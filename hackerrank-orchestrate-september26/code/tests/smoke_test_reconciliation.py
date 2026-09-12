@@ -1,7 +1,11 @@
 """Real-dataset reconciliation smoke test and verification report."""
 
+import sys
 from pathlib import Path
 from collections import Counter
+
+# Ensure project root is in sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from code.loaders import load_dataset
 from code.reconciliation import reconcile_events

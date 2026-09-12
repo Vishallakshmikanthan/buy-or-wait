@@ -22,6 +22,12 @@ from .reconciliation import (
     ActionType,
     ExchangeRateNotFoundError,
 )
+from .image_resolution import (
+    ImageExtractionResult,
+    IMAGE_DOCUMENT_PROFILES,
+    extract_all_images,
+    resolve_ledger_with_images,
+)
 from .parsers import (
     parse_decimal,
     parse_date,
@@ -60,6 +66,10 @@ __all__ = [
     "reconcile_single_event",
     "ActionType",
     "ExchangeRateNotFoundError",
+    "ImageExtractionResult",
+    "IMAGE_DOCUMENT_PROFILES",
+    "extract_all_images",
+    "resolve_ledger_with_images",
     "ValidationError",
     "validate_columns",
     "parse_decimal",

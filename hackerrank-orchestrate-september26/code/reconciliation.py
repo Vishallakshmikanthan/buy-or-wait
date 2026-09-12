@@ -183,6 +183,9 @@ def reconcile_single_event(
 
     # 4. Classify cash impact and direction
     is_cash, impact_type, direction = _classify_cash_impact(status, event.direction, event.event_type)
+    if is_unresolved:
+        # Unresolved events must never be marked as usable cash events
+        is_cash = False
 
     # 5. Currency normalization
     amount_home: Optional[Decimal] = None

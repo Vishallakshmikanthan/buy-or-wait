@@ -70,6 +70,17 @@ class CanonicalEvent:
         """True if the event's amount is missing and needs OCR/vision resolution from media."""
         return self.is_unresolved and self.amount_original is None
 
+    @property
+    def is_numerically_usable_cash_event(self) -> bool:
+        """True if and only if the event is a cash event, is resolved, and has a non-None amount_home."""
+        return self.is_cash_event and (not self.is_unresolved) and (self.amount_home is not None)
+
+    def get_usable_cash_amount(self) -> Decimal:
+        """Return the numerical cash amount. Unresolved or non-cash events strictly return Decimal(0)."""
+        if not self.is_numerically_usable_cash_event or self.amount_home is None:
+            return Decimal("0")
+        return self.amount_home
+
 
 @dataclass
 class CanonicalLedger:
@@ -92,14 +103,14 @@ class CanonicalLedger:
         self.events_by_user = by_user
 
     def get_cash_events(self, user_id: Optional[str] = None) -> List[CanonicalEvent]:
-        """Return only events that have a direct cash-flow impact (settled, scheduled, or reserved)."""
+        """Return only events that have a direct, numerically usable cash-flow impact."""
         pool = self.events_by_user.get(user_id, []) if user_id else self.events
-        return [e for e in pool if e.is_cash_event]
+        return [e for e in pool if e.is_numerically_usable_cash_event]
 
     def get_non_cash_events(self, user_id: Optional[str] = None) -> List[CanonicalEvent]:
-        """Return non-cash, ignored, failed, cancelled, or unrealized events."""
+        """Return non-cash, ignored, failed, cancelled, unrealized, or unresolved events."""
         pool = self.events_by_user.get(user_id, []) if user_id else self.events
-        return [e for e in pool if not e.is_cash_event]
+        return [e for e in pool if not e.is_numerically_usable_cash_event]
 
     def get_unresolved_events(self, user_id: Optional[str] = None) -> List[CanonicalEvent]:
         """Return events requiring external/image evidence extraction."""
