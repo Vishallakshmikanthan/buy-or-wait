@@ -28,6 +28,17 @@ from .image_resolution import (
     extract_all_images,
     resolve_ledger_with_images,
 )
+from .recurrence import (
+    RecurrenceFrequency,
+    AmountForecastingRule,
+    RecurrenceSeries,
+    FutureEvent,
+    SuppressedForecast,
+    FutureExpansionResult,
+    detect_recurrence_for_user,
+    detect_all_recurrence,
+    expand_future_events,
+)
 from .parsers import (
     parse_decimal,
     parse_date,
@@ -70,6 +81,15 @@ __all__ = [
     "IMAGE_DOCUMENT_PROFILES",
     "extract_all_images",
     "resolve_ledger_with_images",
+    "RecurrenceFrequency",
+    "AmountForecastingRule",
+    "RecurrenceSeries",
+    "FutureEvent",
+    "SuppressedForecast",
+    "FutureExpansionResult",
+    "detect_recurrence_for_user",
+    "detect_all_recurrence",
+    "expand_future_events",
     "ValidationError",
     "validate_columns",
     "parse_decimal",
