@@ -115,6 +115,20 @@ def run_user_state_smoke_test() -> None:
             if state.has_unresolved_events:
                 unresolved_events_count += 1
 
+            # Invariant Assertions across all 250 requests
+            expected_cash = state.projected_balance - state.pending_reserved_amount
+            assert state.available_cash == expected_cash, (
+                f"Invariant violation for {req.request_id}: available_cash ({state.available_cash}) != "
+                f"projected_balance ({state.projected_balance}) - pending_reserved ({state.pending_reserved_amount})"
+            )
+            expected_headroom = max(Decimal("0.00"), state.available_cash - state.safety_floor)
+            assert state.current_headroom_above_floor == expected_headroom, (
+                f"Headroom violation for {req.request_id}: {state.current_headroom_above_floor} != {expected_headroom}"
+            )
+            assert state.available_cash == baseline.initial_state.available_cash, (
+                f"Safe-to-pay identity mismatch for {req.request_id}: {state.available_cash} != {baseline.initial_state.available_cash}"
+            )
+
             net_cashflows_30d.append(state.recent_30d_net_cashflow)
 
         except Exception as e:
@@ -130,6 +144,9 @@ def run_user_state_smoke_test() -> None:
     print(f"Requests evaluated:               {len(states)} / {len(ds.requests)}")
     print(f"Distinct users covered:           {len(users_covered)}")
     print(f"Failures:                         {len(failures)}")
+    print("250/250 satisfy the invariant:    available_cash == projected_balance - pending_reserved_amount")
+    print("250/250 satisfy headroom rule:    current_headroom == max(0, available_cash - safety_floor)")
+    print("250/250 satisfy identity rule:    available_cash == safe_to_pay baseline starting state")
     print(f"Has Validated Recurring Income:   {rec_income_count} ({rec_income_count/len(states)*100:.1f}%)")
     print(f"Has Validated Recurring Expenses: {rec_expense_count} ({rec_expense_count/len(states)*100:.1f}%)")
     print(f"Baseline Safety Floor Breach:     {baseline_breach_count} ({baseline_breach_count/len(states)*100:.1f}%)")

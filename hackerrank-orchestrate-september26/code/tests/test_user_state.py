@@ -735,6 +735,227 @@ class TestUserFinancialState(unittest.TestCase):
         self.assertEqual(state_fwd, state_rev)
         self.assertEqual(state_fwd, state_unrelated)
 
+    # =========================================================================
+    # FORENSIC CORRECTNESS AUDIT TESTS (12 Required Invariant & Edge Case Tests)
+    # =========================================================================
+
+    def test_28_forensic_no_pending_debit(self) -> None:
+        """1. No pending debit: available_cash equals projected_balance, pending_reserved is 0."""
+        baseline = simulate_user(self.user_id, self.request_date, self.request_date + timedelta(days=90), profile=self.profile)
+        state = build_user_financial_state(self.request, self.profile, [], [], baseline, [])
+
+        self.assertEqual(state.projected_balance, Decimal("2000.00"))
+        self.assertEqual(state.pending_reserved_amount, Decimal("0.00"))
+        self.assertEqual(state.available_cash, Decimal("2000.00"))
+        self.assertEqual(state.available_cash, state.projected_balance - state.pending_reserved_amount)
+
+    def test_29_forensic_one_pending_debit(self) -> None:
+        """2. One pending debit: reserves cash once, projected_balance unchanged, available cash reduced."""
+        pend = self._make_canonical(
+            "p1", self.request_date, Direction.OUTFLOW, Decimal("350.00"),
+            status="pending", impact_type=CashImpactType.PENDING_DEBIT_RESERVED,
+        )
+        baseline = simulate_user(
+            self.user_id, self.request_date, self.request_date + timedelta(days=90),
+            canonical_events=[pend], profile=self.profile,
+        )
+        state = build_user_financial_state(self.request, self.profile, [pend], [], baseline, [])
+
+        self.assertEqual(state.projected_balance, Decimal("2000.00"))
+        self.assertEqual(state.pending_reserved_amount, Decimal("350.00"))
+        self.assertEqual(state.available_cash, Decimal("1650.00"))
+        self.assertEqual(state.available_cash, state.projected_balance - state.pending_reserved_amount)
+
+    def test_30_forensic_multiple_pending_debits(self) -> None:
+        """3. Multiple pending debits: sum of all active reservations correctly held."""
+        p1 = self._make_canonical("p1", self.request_date, Direction.OUTFLOW, Decimal("200.00"), status="pending", impact_type=CashImpactType.PENDING_DEBIT_RESERVED)
+        p2 = self._make_canonical("p2", self.request_date, Direction.OUTFLOW, Decimal("150.00"), status="pending", impact_type=CashImpactType.PENDING_DEBIT_RESERVED)
+        baseline = simulate_user(
+            self.user_id, self.request_date, self.request_date + timedelta(days=90),
+            canonical_events=[p1, p2], profile=self.profile,
+        )
+        state = build_user_financial_state(self.request, self.profile, [p1, p2], [], baseline, [])
+
+        self.assertEqual(state.projected_balance, Decimal("2000.00"))
+        self.assertEqual(state.pending_reserved_amount, Decimal("350.00"))
+        self.assertEqual(state.available_cash, Decimal("1650.00"))
+        self.assertEqual(state.available_cash, state.projected_balance - state.pending_reserved_amount)
+
+    def test_31_forensic_pending_debit_settlement(self) -> None:
+        """4. Pending debit settlement: hold releases, projected balance drops, no second available cash drop."""
+        p = self._make_canonical("p_settle", self.request_date, Direction.OUTFLOW, Decimal("250.00"), status="pending", impact_type=CashImpactType.PENDING_DEBIT_RESERVED)
+        s = CanonicalEvent(
+            event_id="s_settle", user_id=self.user_id, source_row=2,
+            effective_date=self.request_date + timedelta(days=4), direction=Direction.OUTFLOW,
+            direction_original="debit", amount_original=Decimal("250.00"),
+            currency_original="USD", amount_home=Decimal("250.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=self.request_date + timedelta(days=4),
+            status="settled", is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW,
+            event_type="expense", category="shopping", description="Settled", flexibility="fixed",
+            minimum_allowed_amount_original=None, minimum_allowed_amount_home=None, linked_event_id="p_settle",
+            recurrence_type=RecurrenceClassification.ONE_TIME, is_unresolved=False, unresolved_reason=None,
+            evidence_chain=(), applied_actions=(),
+        )
+        baseline = simulate_user(
+            self.user_id, self.request_date, self.request_date + timedelta(days=90),
+            canonical_events=[p, s], profile=self.profile,
+        )
+        state = build_user_financial_state(self.request, self.profile, [p, s], [], baseline, [])
+
+        # On request date: hold is placed
+        self.assertEqual(state.available_cash, Decimal("1750.00"))
+        self.assertEqual(state.pending_reserved_amount, Decimal("250.00"))
+
+        # On settlement date (Day 4): hold releases, balance drops to 1750, available cash stays 1750
+        settle_snap = baseline.get_snapshot_for_date(self.request_date + timedelta(days=4))
+        self.assertIsNotNone(settle_snap)
+        self.assertEqual(settle_snap.closing_reserved_pending, Decimal("0.00"))
+        self.assertEqual(settle_snap.closing_projected_balance, Decimal("1750.00"))
+        self.assertEqual(settle_snap.closing_available_cash, Decimal("1750.00"))
+
+    def test_32_forensic_same_day_salary(self) -> None:
+        """5. Same-day salary: Priority 0 inflow arrives in timeline, not pre-credited to opening balance."""
+        sal = self._make_canonical(
+            "sal_today", self.request_date, Direction.INFLOW, Decimal("1000.00"),
+            category="salary", status="settled", impact_type=CashImpactType.SETTLED_INFLOW,
+        )
+        baseline = simulate_user(
+            self.user_id, self.request_date, self.request_date + timedelta(days=90),
+            canonical_events=[sal], profile=self.profile,
+        )
+        state = build_user_financial_state(self.request, self.profile, [sal], [], baseline, [])
+
+        # Current state reflects opening standing
+        self.assertEqual(state.projected_balance, Decimal("2000.00"))
+        self.assertEqual(state.available_cash, Decimal("2000.00"))
+        self.assertEqual(state.pending_reserved_amount, Decimal("0.00"))
+
+        # Daily snapshot reflects arrival of salary
+        snap_today = baseline.get_snapshot_for_date(self.request_date)
+        self.assertIsNotNone(snap_today)
+        self.assertEqual(snap_today.closing_available_cash, Decimal("3000.00"))
+
+    def test_33_forensic_same_day_obligation(self) -> None:
+        """6. Same-day obligation: Priority 2 outflow is an upcoming obligation, not double-deducted from opening cash."""
+        rent = self._make_canonical(
+            "rent_today", self.request_date, Direction.OUTFLOW, Decimal("600.00"),
+            category="rent", status="scheduled", impact_type=CashImpactType.SCHEDULED_OUTFLOW,
+        )
+        baseline = simulate_user(
+            self.user_id, self.request_date, self.request_date + timedelta(days=90),
+            canonical_events=[rent], profile=self.profile,
+        )
+        state = build_user_financial_state(self.request, self.profile, [rent], [], baseline, [])
+
+        # Opening state has full 2000.00
+        self.assertEqual(state.projected_balance, Decimal("2000.00"))
+        self.assertEqual(state.available_cash, Decimal("2000.00"))
+        self.assertEqual(state.pending_reserved_amount, Decimal("0.00"))
+
+        # Obligation is cleanly cataloged in upcoming obligations
+        self.assertEqual(state.upcoming_obligations_count, 1)
+        self.assertEqual(state.upcoming_obligations[0].amount, Decimal("600.00"))
+
+        # Simulator processes obligation in timeline
+        snap_today = baseline.get_snapshot_for_date(self.request_date)
+        self.assertIsNotNone(snap_today)
+        self.assertEqual(snap_today.closing_available_cash, Decimal("1400.00"))
+
+    def test_34_forensic_salary_plus_pending_hold_plus_obligation(self) -> None:
+        """7. Salary + pending hold + obligation: all three on request date follow strict priority ordering."""
+        sal = self._make_canonical("sal_p0", self.request_date, Direction.INFLOW, Decimal("1000.00"), category="salary", impact_type=CashImpactType.SETTLED_INFLOW)
+        hold = self._make_canonical("hold_p1", self.request_date, Direction.OUTFLOW, Decimal("300.00"), status="pending", impact_type=CashImpactType.PENDING_DEBIT_RESERVED)
+        ob = self._make_canonical("ob_p2", self.request_date, Direction.OUTFLOW, Decimal("500.00"), category="rent", status="scheduled", impact_type=CashImpactType.SCHEDULED_OUTFLOW)
+
+        baseline = simulate_user(
+            self.user_id, self.request_date, self.request_date + timedelta(days=90),
+            canonical_events=[sal, hold, ob], profile=self.profile,
+        )
+        state = build_user_financial_state(self.request, self.profile, [sal, hold, ob], [], baseline, [])
+
+        # Current state: opening balance 2000 minus hold 300 = 1700
+        self.assertEqual(state.projected_balance, Decimal("2000.00"))
+        self.assertEqual(state.pending_reserved_amount, Decimal("300.00"))
+        self.assertEqual(state.available_cash, Decimal("1700.00"))
+        self.assertEqual(state.available_cash, state.projected_balance - state.pending_reserved_amount)
+
+        # Simulator timeline execution order:
+        # Step 1 (Priority 0): Inflow +1000 -> Bal 3000, Avail 3000
+        # Step 2 (Priority 1): Hold 300     -> Bal 3000, Res 300, Avail 2700
+        # Step 3 (Priority 2): Outflow 500  -> Bal 2500, Res 300, Avail 2200
+        transitions = [t for t in baseline.event_transitions if t.date == self.request_date]
+        self.assertEqual(len(transitions), 3)
+        self.assertEqual(transitions[0].event_id, "sal_p0")
+        self.assertEqual(transitions[1].event_id, "hold_p1")
+        self.assertEqual(transitions[2].event_id, "ob_p2")
+        self.assertEqual(transitions[2].available_after, Decimal("2200.00"))
+
+    def test_35_forensic_baseline_historical_events(self) -> None:
+        """8. Baseline historical events: settled events before request anchor only inform statistics, not current cash."""
+        hist_credit = self._make_canonical("h1", date(2025, 3, 10), Direction.INFLOW, Decimal("5000.00"), impact_type=CashImpactType.SETTLED_INFLOW)
+        hist_debit = self._make_canonical("h2", date(2025, 3, 15), Direction.OUTFLOW, Decimal("4500.00"), impact_type=CashImpactType.SETTLED_OUTFLOW)
+
+        baseline = simulate_user(
+            self.user_id, self.request_date, self.request_date + timedelta(days=90),
+            canonical_events=[hist_credit, hist_debit], profile=self.profile,
+        )
+        state = build_user_financial_state(self.request, self.profile, [hist_credit, hist_debit], [], baseline, [])
+
+        # Current cash remains exactly profile anchor
+        self.assertEqual(state.available_cash, Decimal("2000.00"))
+        self.assertEqual(state.projected_balance, Decimal("2000.00"))
+        # Historical metrics are informed
+        self.assertEqual(state.recent_30d_income, Decimal("5000.00"))
+        self.assertEqual(state.recent_30d_outflow, Decimal("4500.00"))
+
+    def test_36_forensic_request_date_snapshot_selection(self) -> None:
+        """9. Request-date snapshot selection: current cash strictly reflects opening balance net of active holds."""
+        fut_expense = self._make_future("fut_exp", self.request_date, Direction.OUTFLOW, Decimal("800.00"), category="shopping")
+        baseline = simulate_user(
+            self.user_id, self.request_date, self.request_date + timedelta(days=90),
+            future_events=[fut_expense], profile=self.profile,
+        )
+        state = build_user_financial_state(self.request, self.profile, [], [fut_expense], baseline, [])
+
+        # Opening state is NOT polluted by future expense on request date
+        self.assertEqual(state.available_cash, Decimal("2000.00"))
+        self.assertEqual(state.projected_balance, Decimal("2000.00"))
+        self.assertEqual(state.pending_reserved_amount, Decimal("0.00"))
+
+    def test_37_forensic_available_cash_invariant(self) -> None:
+        """10. Available cash invariant: state.available_cash == state.projected_balance - state.pending_reserved_amount."""
+        for hold_amt in [Decimal("0.00"), Decimal("100.00"), Decimal("500.00"), Decimal("2000.00")]:
+            events = []
+            if hold_amt > Decimal("0.00"):
+                events.append(self._make_canonical("p_inv", self.request_date, Direction.OUTFLOW, hold_amt, status="pending", impact_type=CashImpactType.PENDING_DEBIT_RESERVED))
+            baseline = simulate_user(self.user_id, self.request_date, self.request_date + timedelta(days=90), canonical_events=events, profile=self.profile)
+            state = build_user_financial_state(self.request, self.profile, events, [], baseline, [])
+            self.assertEqual(state.available_cash, state.projected_balance - state.pending_reserved_amount)
+
+    def test_38_forensic_headroom_invariant(self) -> None:
+        """11. Headroom invariant: current_headroom_above_floor == max(0, available_cash - safety_floor)."""
+        for bal in [Decimal("400.00"), Decimal("500.00"), Decimal("1200.00"), Decimal("5000.00")]:
+            prof = FinancialProfile(
+                user_id=self.user_id, home_currency=self.home_currency,
+                current_available_balance=bal, minimum_balance_to_keep=Decimal("500.00"),
+                financial_priorities=(), expense_categories_to_protect=(),
+                expense_categories_user_is_willing_to_reduce=(), expense_categories_user_is_willing_to_stop=(),
+                payment_methods_user_will_consider=(), max_installment_months=None,
+            )
+            baseline = simulate_user(self.user_id, self.request_date, self.request_date + timedelta(days=90), profile=prof)
+            state = build_user_financial_state(self.request, prof, [], [], baseline, [])
+            expected_headroom = max(Decimal("0.00"), state.available_cash - prof.minimum_balance_to_keep)
+            self.assertEqual(state.current_headroom_above_floor, expected_headroom)
+
+    def test_39_forensic_state_vs_safe_to_pay_simulator_identity(self) -> None:
+        """12. State vs safe-to-pay simulator identity: UserFinancialState matches baseline initial state."""
+        baseline = simulate_user(self.user_id, self.request_date, self.request_date + timedelta(days=90), profile=self.profile)
+        state = build_user_financial_state(self.request, self.profile, [], [], baseline, [])
+
+        self.assertEqual(state.available_cash, baseline.initial_state.available_cash)
+        self.assertEqual(state.projected_balance, baseline.initial_state.projected_balance)
+        self.assertEqual(state.pending_reserved_amount, baseline.initial_state.reserved_pending)
+
 
 if __name__ == "__main__":
     unittest.main()

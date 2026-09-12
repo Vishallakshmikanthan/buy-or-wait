@@ -430,15 +430,18 @@ def build_user_financial_state(
     safety_floor = profile.minimum_balance_to_keep
     min_bal = profile.minimum_balance_to_keep
 
-    today_snap = baseline_simulation.get_snapshot_for_date(req_d)
-    if today_snap:
-        projected_bal = today_snap.closing_projected_balance
-        pending_reserved = today_snap.closing_reserved_pending
-        available_cash = today_snap.closing_available_cash
-    else:
-        projected_bal = init_state.projected_balance
-        pending_reserved = init_state.reserved_pending
-        available_cash = init_state.available_cash
+    # Authoritative current cash state as of request_date:
+    # Captures opening ledger balance and any pending authorization holds active on request_date.
+    # Same-day scheduled outflows (Priority 2, e.g. rent/utilities) are future commitments evaluated
+    # in upcoming_obligations and the baseline 90-day trajectory; they are NOT pre-deducted from current cash.
+    req_d_holds = sum(
+        (t.amount for t in baseline_simulation.event_transitions
+         if t.date == req_d and t.cash_impact_type == CashImpactType.PENDING_DEBIT_RESERVED),
+        Decimal("0.00"),
+    )
+    projected_bal = init_state.projected_balance
+    pending_reserved = init_state.reserved_pending + req_d_holds
+    available_cash = projected_bal - pending_reserved
 
     current_headroom = max(Decimal("0.00"), available_cash - safety_floor)
 
