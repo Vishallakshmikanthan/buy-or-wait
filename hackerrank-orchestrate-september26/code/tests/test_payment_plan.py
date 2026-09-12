@@ -1119,6 +1119,432 @@ class TestPaymentPlanContractualAudit(unittest.TestCase):
         self.assertIn("option belongs to different request", res.rejection_reason)
 
 
+class TestPaymentPlanContractBoundaryAuditPrompt9C(unittest.TestCase):
+    """Prompt 9C Contractual Boundary Tests A through M and Properties 1 through 5.
+
+    Tests:
+    A. request-date vs first-payment-date duration anchor
+    B. month-end arithmetic
+    C. desired_completion_date inside horizon
+    D. desired_completion_date equal horizon
+    E. desired_completion_date beyond horizon
+    F. last payment before deadline
+    G. last payment exactly deadline
+    H. last payment after deadline
+    I. last payment inside horizon but after desired deadline
+    J. last payment after horizon
+    K. full payment on request date
+    L. first payment after request date
+    M. deterministic repeated evaluation
+    """
+
+    def setUp(self) -> None:
+        self.profile = make_profile()
+        self.request = make_request()
+
+    def test_boundary_a_request_date_vs_first_payment_date_duration_anchor(self) -> None:
+        """A. Contrast request_date vs first_payment_date duration anchor.
+
+        Example:
+        request_date = 2026-01-31
+        first_payment_date = 2026-02-14
+        max_installment_months = 1
+        limit_A (req_date + 1m) = 2026-02-28
+        limit_B (fp_date + 1m) = 2026-03-14
+
+        An installment plan ending 2026-03-10:
+        - exceeds limit_A (2026-03-10 > 2026-02-28)
+        - within limit_B (2026-03-10 <= 2026-03-14)
+        Under specification, contractual schedule duration is anchored at first_payment_date.
+        """
+        req = make_request(request_date=date(2026, 1, 31), desired_completion_date=date(2026, 4, 30))
+        prof = make_profile(max_installment_months=1)
+
+        # 2 payments: Feb 14 and March 10 (freq=24 days)
+        opt = PaymentOption(
+            payment_option_id="opt_differentiating",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("600.00"),
+            number_of_payments=2,
+            first_payment_date=date(2026, 2, 14),
+            payment_frequency_days=24,  # second payment on 2026-03-10
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        res = evaluate_payment_option_feasibility(opt, req, prof, (), ())
+        # Under Anchor B (first_payment_date), 2026-03-10 <= 2026-03-14, so eligible
+        self.assertTrue(res.is_eligible)
+        self.assertTrue(res.is_safe)
+
+    def test_boundary_b_month_end_arithmetic(self) -> None:
+        """B. Month-end arithmetic correctly caps to month length without treating month as 30 days.
+
+        Jan 31 + 1 month -> Feb 28 (non-leap year)
+        Feb 28 + 1 month -> Mar 28
+        Mar 31 + 1 month -> Apr 30
+        """
+        self.assertEqual(add_calendar_months(date(2026, 1, 31), 1), date(2026, 2, 28))
+        self.assertEqual(add_calendar_months(date(2024, 1, 31), 1), date(2024, 2, 29))  # Leap year
+        self.assertEqual(add_calendar_months(date(2026, 3, 31), 1), date(2026, 4, 30))
+        self.assertEqual(add_calendar_months(date(2026, 5, 31), 1), date(2026, 6, 30))
+        self.assertEqual(add_calendar_months(date(2026, 8, 31), 1), date(2026, 9, 30))
+
+    def test_boundary_c_desired_completion_date_inside_horizon(self) -> None:
+        """C. desired_completion_date inside 90-day simulation horizon.
+
+        Plan completes on desired_completion_date: eligible and safe.
+        """
+        req = make_request(request_date=date(2026, 1, 1), desired_completion_date=date(2026, 2, 15))
+        opt = PaymentOption(
+            payment_option_id="opt_inside",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("600.00"),
+            number_of_payments=2,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=45,  # last payment on 2026-02-15 == desired_completion_date
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        res = evaluate_payment_option_feasibility(opt, req, self.profile, (), ())
+        self.assertTrue(res.is_eligible)
+        self.assertTrue(res.is_safe)
+        self.assertLessEqual(res.payment_plan.last_payment_date, req.desired_completion_date)
+
+    def test_boundary_d_desired_completion_date_equal_horizon(self) -> None:
+        """D. desired_completion_date exactly equals 90-day horizon."""
+        req = make_request(request_date=date(2026, 1, 1), desired_completion_date=date(2026, 4, 1))  # 90 days
+        opt = PaymentOption(
+            payment_option_id="opt_eq_horizon",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("600.00"),
+            number_of_payments=2,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=90,  # last payment on 2026-04-01
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        res = evaluate_payment_option_feasibility(opt, req, self.profile, (), ())
+        self.assertTrue(res.is_eligible)
+        self.assertTrue(res.is_safe)
+        self.assertEqual(res.payment_plan.last_payment_date, req.desired_completion_date)
+
+    def test_boundary_e_desired_completion_date_beyond_horizon(self) -> None:
+        """E. desired_completion_date beyond 90-day horizon (e.g. 120 days).
+
+        An option completing at day 75 is inside horizon and completes before desired deadline.
+        """
+        req = make_request(request_date=date(2026, 1, 1), desired_completion_date=date(2026, 5, 1))  # 120 days
+        opt = PaymentOption(
+            payment_option_id="opt_day_75",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("600.00"),
+            number_of_payments=2,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=75,
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        res = evaluate_payment_option_feasibility(opt, req, self.profile, (), ())
+        self.assertTrue(res.is_eligible)
+        self.assertTrue(res.is_safe)
+
+    def test_boundary_f_last_payment_before_deadline(self) -> None:
+        """F. Last payment strictly before desired_completion_date."""
+        req = make_request(request_date=date(2026, 1, 1), desired_completion_date=date(2026, 3, 15))
+        opt = PaymentOption(
+            payment_option_id="opt_before_dl",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("600.00"),
+            number_of_payments=2,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=60,  # last payment 2026-03-02 < 2026-03-15
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        res = evaluate_payment_option_feasibility(opt, req, self.profile, (), ())
+        self.assertTrue(res.is_eligible)
+        self.assertTrue(res.is_safe)
+        self.assertLess(res.payment_plan.last_payment_date, req.desired_completion_date)
+
+    def test_boundary_g_last_payment_exactly_deadline(self) -> None:
+        """G. Last payment exactly on desired_completion_date."""
+        req = make_request(request_date=date(2026, 1, 1), desired_completion_date=date(2026, 3, 2))
+        opt = PaymentOption(
+            payment_option_id="opt_exact_dl",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("600.00"),
+            number_of_payments=2,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=60,  # last payment 2026-03-02 == desired_completion_date
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        res = evaluate_payment_option_feasibility(opt, req, self.profile, (), ())
+        self.assertTrue(res.is_eligible)
+        self.assertTrue(res.is_safe)
+        self.assertEqual(res.payment_plan.last_payment_date, req.desired_completion_date)
+
+    def test_boundary_h_last_payment_after_deadline(self) -> None:
+        """H. Last payment after desired_completion_date."""
+        req = make_request(request_date=date(2026, 1, 1), desired_completion_date=date(2026, 2, 15))
+        opt = PaymentOption(
+            payment_option_id="opt_after_dl",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("600.00"),
+            number_of_payments=2,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=60,  # last payment 2026-03-02 > 2026-02-15
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        res = evaluate_payment_option_feasibility(opt, req, self.profile, (), ())
+        self.assertGreater(res.payment_plan.last_payment_date, req.desired_completion_date)
+        # Inside 90-day horizon (60 <= 90), eligible and safe
+        self.assertTrue(res.is_eligible)
+        self.assertTrue(res.is_safe)
+
+    def test_boundary_i_last_payment_inside_horizon_but_after_desired_deadline(self) -> None:
+        """I. Last payment inside 90-day horizon but after desired completion deadline."""
+        req = make_request(request_date=date(2026, 1, 1), desired_completion_date=date(2026, 2, 1))  # 31 days
+        opt = PaymentOption(
+            payment_option_id="opt_inside_h_after_dl",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("400.00"),
+            number_of_payments=3,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=25,  # payments: Jan 1, Jan 26, Feb 20 (day 50)
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        res = evaluate_payment_option_feasibility(opt, req, self.profile, (), ())
+        self.assertTrue(res.is_eligible)
+        self.assertTrue(res.is_safe)
+        self.assertGreater(res.payment_plan.last_payment_date, req.desired_completion_date)
+        self.assertLessEqual(res.payment_plan.last_payment_date, req.request_date + timedelta(days=90))
+
+    def test_boundary_j_last_payment_after_horizon(self) -> None:
+        """J. Last payment strictly after 90-day simulation horizon is rejected."""
+        req = make_request(request_date=date(2026, 1, 1), desired_completion_date=date(2026, 5, 1))
+        opt = PaymentOption(
+            payment_option_id="opt_after_horizon",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("600.00"),
+            number_of_payments=2,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=91,  # day 91 > 90
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        res = evaluate_payment_option_feasibility(opt, req, self.profile, (), ())
+        self.assertFalse(res.is_eligible)
+        self.assertFalse(res.is_safe)
+        self.assertIn("payment schedule outside allowed horizon", res.rejection_reason)
+
+    def test_boundary_k_full_payment_on_request_date(self) -> None:
+        """K. Full payment occurring exactly on request_date."""
+        req = make_request(request_date=date(2026, 1, 1))
+        opt = PaymentOption(
+            payment_option_id="opt_full_today",
+            request_id="request_test",
+            payment_method="full_payment",
+            payment_amount=Decimal("1200.00"),
+            number_of_payments=1,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=None,
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        res = evaluate_payment_option_feasibility(opt, req, self.profile, (), ())
+        self.assertTrue(res.is_eligible)
+        self.assertTrue(res.is_safe)
+        self.assertEqual(res.payment_plan.first_payment_date, req.request_date)
+
+    def test_boundary_l_first_payment_after_request_date(self) -> None:
+        """L. First payment occurring strictly after request_date."""
+        req = make_request(request_date=date(2026, 1, 1))
+        opt = PaymentOption(
+            payment_option_id="opt_fp_later",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("600.00"),
+            number_of_payments=2,
+            first_payment_date=date(2026, 1, 15),  # 14 days later
+            payment_frequency_days=30,
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        res = evaluate_payment_option_feasibility(opt, req, self.profile, (), ())
+        self.assertTrue(res.is_eligible)
+        self.assertTrue(res.is_safe)
+        self.assertGreater(res.payment_plan.first_payment_date, req.request_date)
+
+    def test_boundary_m_deterministic_repeated_evaluation(self) -> None:
+        """M. Repeated evaluations produce identical results with zero drift."""
+        opt = PaymentOption(
+            payment_option_id="opt_repeat",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("400.00"),
+            number_of_payments=3,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=30,
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        res1 = evaluate_payment_option_feasibility(opt, self.request, self.profile, (), ())
+        res2 = evaluate_payment_option_feasibility(opt, self.request, self.profile, (), ())
+        self.assertEqual(res1.is_eligible, res2.is_eligible)
+        self.assertEqual(res1.is_safe, res2.is_safe)
+        self.assertEqual(res1.rejection_reason, res2.rejection_reason)
+        self.assertEqual(res1.minimum_available_cash, res2.minimum_available_cash)
+        self.assertEqual(res1.limiting_date, res2.limiting_date)
+
+    # =========================================================================
+    # Prompt 9C Properties 1 through 5
+    # =========================================================================
+
+    def test_property_1_moving_last_payment_later_cannot_increase_duration_eligibility(self) -> None:
+        """PROPERTY 1: An option whose last payment moves later cannot become more eligible under a duration constraint."""
+        opt_base = PaymentOption(
+            payment_option_id="opt_base",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("600.00"),
+            number_of_payments=2,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=60,  # finishes day 60
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        opt_later = PaymentOption(
+            payment_option_id="opt_later",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("600.00"),
+            number_of_payments=2,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=95,  # finishes day 95 (> horizon and > 3 months)
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        prof = make_profile(max_installment_months=2)  # limit 2026-03-01
+        res_base = evaluate_payment_option_feasibility(opt_base, self.request, prof, (), ())
+        res_later = evaluate_payment_option_feasibility(opt_later, self.request, prof, (), ())
+
+        if not res_base.is_eligible:
+            self.assertFalse(res_later.is_eligible)
+
+    def test_property_2_tightening_desired_completion_date_cannot_make_eligible(self) -> None:
+        """PROPERTY 2: Tightening desired_completion_date cannot make an option newly eligible."""
+        opt = PaymentOption(
+            payment_option_id="opt_prop2",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("600.00"),
+            number_of_payments=2,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=95,  # day 95 > 90d horizon
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        req_broad = make_request(desired_completion_date=date(2026, 4, 30))
+        req_tight = make_request(desired_completion_date=date(2026, 1, 15))
+
+        res_broad = evaluate_payment_option_feasibility(opt, req_broad, self.profile, (), ())
+        res_tight = evaluate_payment_option_feasibility(opt, req_tight, self.profile, (), ())
+
+        self.assertFalse(res_broad.is_eligible)
+        self.assertFalse(res_tight.is_eligible)
+
+    def test_property_3_increasing_max_installment_months_cannot_make_ineligible(self) -> None:
+        """PROPERTY 3: Increasing max_installment_months cannot make a previously eligible option ineligible solely due to that constraint."""
+        opt = PaymentOption(
+            payment_option_id="opt_prop3",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("400.00"),
+            number_of_payments=3,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=25,  # ends day 50 (~1.7 months)
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        prof_2m = make_profile(max_installment_months=2)
+        prof_6m = make_profile(max_installment_months=6)
+
+        res_2m = evaluate_payment_option_feasibility(opt, self.request, prof_2m, (), ())
+        res_6m = evaluate_payment_option_feasibility(opt, self.request, prof_6m, (), ())
+
+        self.assertTrue(res_2m.is_eligible)
+        self.assertTrue(res_6m.is_eligible)
+
+    def test_property_4_changing_first_payment_date_affects_eligibility_only_via_duration_rules(self) -> None:
+        """PROPERTY 4: Changing first_payment_date while preserving all other values must affect eligibility ONLY if duration/deadline rule makes it relevant."""
+        # Case 1: fp_date precedes request_date -> strictly ineligible
+        opt_early = PaymentOption(
+            payment_option_id="opt_early",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("600.00"),
+            number_of_payments=2,
+            first_payment_date=date(2025, 12, 15),  # before 2026-01-01
+            payment_frequency_days=30,
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        res_early = evaluate_payment_option_feasibility(opt_early, self.request, self.profile, (), ())
+        self.assertFalse(res_early.is_eligible)
+        self.assertIn("precedes request date", res_early.rejection_reason)
+
+        # Case 2: fp_date shifted forward such that last payment crosses 90-day horizon -> becomes ineligible
+        opt_shifted_past_horizon = PaymentOption(
+            payment_option_id="opt_shifted",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("600.00"),
+            number_of_payments=2,
+            first_payment_date=date(2026, 3, 1),  # day 60
+            payment_frequency_days=40,            # second payment on day 100 > 90
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        res_shifted = evaluate_payment_option_feasibility(opt_shifted_past_horizon, self.request, self.profile, (), ())
+        self.assertFalse(res_shifted.is_eligible)
+        self.assertIn("payment schedule outside allowed horizon", res_shifted.rejection_reason)
+
+    def test_property_5_changing_request_date_affects_eligibility_only_through_explicit_constraints(self) -> None:
+        """PROPERTY 5: Changing request_date must not affect eligibility except through explicitly specified constraints."""
+        opt = PaymentOption(
+            payment_option_id="opt_prop5",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("600.00"),
+            number_of_payments=2,
+            first_payment_date=date(2026, 1, 10),
+            payment_frequency_days=30,
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        # Shift request date forward to Jan 5 (first_payment_date is still after request date and inside 90d horizon)
+        req1 = make_request(request_date=date(2026, 1, 1))
+        req2 = make_request(request_date=date(2026, 1, 5))
+
+        res1 = evaluate_payment_option_feasibility(opt, req1, self.profile, (), ())
+        res2 = evaluate_payment_option_feasibility(opt, req2, self.profile, (), ())
+
+        self.assertEqual(res1.is_eligible, res2.is_eligible)
+        self.assertEqual(res1.is_safe, res2.is_safe)
+
+
 if __name__ == "__main__":
     unittest.main()
 

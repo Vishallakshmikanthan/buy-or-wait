@@ -3325,6 +3325,84 @@ repo_root=c:\Users\Lenovo\Downloads\buy-or-wait\hackerrank-orchestrate-september
 worktree=main
 parent_agent=none
 
+## [2026-09-13T01:25:00+05:30] Prompt 9C: Final Payment Contract Boundary Audit
+
+User Prompt (verbatim, secrets redacted):
+Prompt 9C — FINAL PAYMENT CONTRACT BOUNDARY AUDIT
+
+We are NOT implementing ranking or recommendation yet.
+
+The payment-option feasibility engine is almost frozen.
+
+This prompt exists ONLY to resolve two remaining contractual questions:
+1. exact meaning of max_installment_months
+2. exact relationship between desired_completion_date and the 90-day forecast horizon
+
+Do NOT implement:
+- ranking
+- best option
+- scoring
+- payment-method recommendation
+- partial payment
+- spending changes
+- LLM explanation
+- output.csv
+
+Do NOT modify:
+- canonical.py
+- recurrence.py
+- simulator.py
+- safe_to_pay.py
+- user_state.py
+- affordability.py
+
+Only modify payment_plan.py/tests if the audit proves a semantic defect.
+
+==================================================
+1. READ THE ACTUAL SOURCES
+2. MAX_INSTALLMENT_MONTHS — PROVE THE ANCHOR DATE
+3. CONSTRUCT DIFFERENTIATING EXAMPLES
+4. DATASET CROSS-CHECK
+5. DESIRED_COMPLETION_DATE — CRITICAL
+6. DISTINGUISH THREE DIFFERENT CONCEPTS
+7. PAYMENT PLAN DEADLINE
+8. IMPORTANT HYPOTHETICAL CASE
+9. IF THE SPECIFICATION IS SILENT
+10. CURRENT IMPLEMENTATION AUDIT
+11. TESTS
+12. PROPERTY TESTS
+13. REAL-DATA AUDIT
+14. 250 REQUEST AUDIT
+15. UPSTREAM REGRESSION
+16. FULL TEST SUITE
+17. LOGGING
+18. STOP
+
+Agent Response Summary:
+Completed final payment contract boundary audit for Prompt 9C.
+1. Proved that max_installment_months is the maximum contractual duration of the installment schedule, anchored at first_payment_date: last_payment_date <= add_calendar_months(first_payment_date, max_installment_months). Tested synthetic cases differentiating request_date anchor vs first_payment_date anchor. Evaluated all 515 installment options: only 1 option (payment_option_679 on request_235) differs between anchors, but it has a 150-day schedule that is independently rejected by the 90-day simulation horizon (150 > 90); thus, zero options inside the 90-day horizon differ in eligibility.
+2. Proved exact relationship among contractual duration, desired_completion_date, and 90-day simulation horizon. Audited all 275 requests (25 sample, 250 eval): exactly 275/275 (100.0%) have request_date < desired_completion_date < request_date + 90 days (min delta: 6 days, max delta: 86 days). Proved from problem_statement.md that desired_completion_date is the #1 ranking criterion among safe plans ('1. Complete the full request by desired_completion_date') and an eligibility condition for partial_payment; options with payments past desired_completion_date remain evaluable and eligible for simulation up to the 90-day horizon boundary.
+3. Added 18 unit and property tests in code/tests/test_payment_plan.py (TestPaymentPlanContractBoundaryAuditPrompt9C: Tests A-M and Properties 1-5), expanding test suite from 278 to 296 tests (100% passing in 0.266s).
+4. Ran all 790 options in code/tests/smoke_test_payment_plan.py: 790 valid, 247 eligible (146 safe, 101 unsafe), 543 ineligible (340 preference-rejected, 191 duration-rejected, 12 horizon-rejected), 100% mutually exclusive reconciliation.
+5. Audited 250 evaluation requests: zero upstream regression across baseline simulator, safe_to_pay, user_state, recurrence, and canonical ledger. Zero ranking, scoring, or recommendation logic implemented.
+
+Actions:
+* audited AGENTS.md, problem_statement.md, and dataset schemas for boundary semantics
+* constructed synthetic differentiating cases for anchor date and deadline vs horizon
+* performed full dataset cross-check across all 515 installment options and 275 requests
+* verified current payment_plan.py implementation is contractually correct (0 semantic defects)
+* added TestPaymentPlanContractBoundaryAuditPrompt9C with Tests A-M and Properties 1-5 to code/tests/test_payment_plan.py
+* executed full test suite: 296 tests passing in 0.266s
+* executed smoke_test_payment_plan.py across all 790 options and 250 requests (0 upstream discrepancies)
+* updated log.txt following AGENTS.md contract
+
+Context:
+tool=Antigravity
+branch=master
+repo_root=c:\Users\Lenovo\Downloads\buy-or-wait\hackerrank-orchestrate-september26
+worktree=main
+parent_agent=none
+
 
 
 
