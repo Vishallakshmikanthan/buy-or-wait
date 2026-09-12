@@ -9,6 +9,19 @@ from .models import (
     ImageMetadata,
     FinancialRequest,
 )
+from .canonical import (
+    CanonicalEvent,
+    CanonicalLedger,
+    Direction,
+    CashImpactType,
+    RecurrenceClassification,
+)
+from .reconciliation import (
+    reconcile_events,
+    reconcile_single_event,
+    ActionType,
+    ExchangeRateNotFoundError,
+)
 from .parsers import (
     parse_decimal,
     parse_date,
@@ -38,6 +51,15 @@ __all__ = [
     "Message",
     "ImageMetadata",
     "FinancialRequest",
+    "CanonicalEvent",
+    "CanonicalLedger",
+    "Direction",
+    "CashImpactType",
+    "RecurrenceClassification",
+    "reconcile_events",
+    "reconcile_single_event",
+    "ActionType",
+    "ExchangeRateNotFoundError",
     "ValidationError",
     "validate_columns",
     "parse_decimal",
