@@ -10,7 +10,13 @@ into the official contest statuses:
 - affordable_with_plan
 - affordable_later
 - not_affordable
-- plan_evaluation_required (provisional state when downstream plan has not been evaluated)
+
+The public AffordabilityStatus enum contains strictly these four contest-defined values.
+Uncertainty when the downstream payment-plan layer has not yet run is exposed via
+separate metadata fields:
+- requires_payment_plan_evaluation: bool
+- is_provisional: bool
+- provisional_status: Optional[AffordabilityStatus]
 
 Does not modify upstream simulator or safe_to_pay state.
 Does not call any LLM.
@@ -29,12 +35,11 @@ from code.safe_to_pay import SafeToPayCertificate
 
 
 class AffordabilityStatus(str, Enum):
-    """Allowed affordability status values under contest rules, plus provisional state."""
+    """The four official contest-defined affordability status values."""
     AFFORDABLE_NOW = "affordable_now"
     AFFORDABLE_WITH_PLAN = "affordable_with_plan"
     AFFORDABLE_LATER = "affordable_later"
     NOT_AFFORDABLE = "not_affordable"
-    PLAN_EVALUATION_REQUIRED = "plan_evaluation_required"
 
 
 def status_rank(status: Union[AffordabilityStatus, str]) -> int:
@@ -45,7 +50,6 @@ def status_rank(status: Union[AffordabilityStatus, str]) -> int:
     AFFORDABLE_WITH_PLAN: 2
     AFFORDABLE_LATER: 1
     NOT_AFFORDABLE: 0
-    PLAN_EVALUATION_REQUIRED: -1
     """
     val = status.value if isinstance(status, AffordabilityStatus) else str(status)
     if val == AffordabilityStatus.AFFORDABLE_NOW.value:
@@ -56,8 +60,6 @@ def status_rank(status: Union[AffordabilityStatus, str]) -> int:
         return 1
     if val == AffordabilityStatus.NOT_AFFORDABLE.value:
         return 0
-    if val == AffordabilityStatus.PLAN_EVALUATION_REQUIRED.value:
-        return -1
     raise ValueError(f"Unknown status value: {val}")
 
 
@@ -102,6 +104,16 @@ class AffordabilityResult:
     certificate_reference: AffordabilityCertificateReference
     certificate: Optional[SafeToPayCertificate] = None
 
+    def __post_init__(self) -> None:
+        """Enforce the critical invariant: status is strictly one of the 4 contest statuses."""
+        if self.status not in (
+            AffordabilityStatus.AFFORDABLE_NOW,
+            AffordabilityStatus.AFFORDABLE_WITH_PLAN,
+            AffordabilityStatus.AFFORDABLE_LATER,
+            AffordabilityStatus.NOT_AFFORDABLE,
+        ):
+            raise ValueError(f"Invalid affordability status: {self.status}")
+
     @property
     def is_affordable_now(self) -> bool:
         return self.status == AffordabilityStatus.AFFORDABLE_NOW
@@ -128,7 +140,6 @@ def classify_affordability(
     profile: FinancialProfile,
     request: FinancialRequest,
     payment_plan_feasible: Optional[Union[bool, PaymentPlanFeasibility]] = None,
-    allow_provisional: bool = False,
     respect_deadline: bool = False,
     require_full_payment_preference_for_later: bool = False,
 ) -> AffordabilityResult:
@@ -145,8 +156,12 @@ def classify_affordability(
          and no valid payment plan exists.
     4. not_affordable:
        - No safe full payment within horizon and no valid payment plan exists.
-    5. plan_evaluation_required (provisional):
-       - Full payment not safe today (or refused by user policy), and payment_plan_feasible is None.
+
+    When payment_plan_feasible is None:
+       - Returns the conservative fallback status in AffordabilityResult.status.
+       - Marks is_provisional = True and requires_payment_plan_evaluation = True.
+       - Records provisional_status = fallback_status.
+       - The status is ALWAYS an element of {affordable_now, affordable_with_plan, affordable_later, not_affordable}.
 
     Args:
         certificate: Authoritative audit certificate from safe_to_pay.py.
@@ -156,16 +171,13 @@ def classify_affordability(
             None = payment-plan layer not evaluated yet.
             True = a valid deterministic plan exists.
             False = no valid plan exists.
-        allow_provisional: If True and payment_plan_feasible is None, resolves status to the
-            provisional fallback (affordable_later or not_affordable) with is_provisional=True.
-            If False (default), preserves plan_evaluation_required.
         respect_deadline: If True, requires earliest_date <= desired_completion_date for affordable_later.
             Defaults to False (pure 90-day horizon financial capacity).
         require_full_payment_preference_for_later: If True, requires user to accept full_payment for
             affordable_later. Defaults to False (measures capacity independently of payment method preference).
 
     Returns:
-        Immutable AffordabilityResult.
+        Immutable AffordabilityResult with status in AffordabilityStatus.
     """
     req_amt = certificate.requested_amount
     safe_amt = certificate.amount_safe_to_pay
@@ -246,7 +258,7 @@ def classify_affordability(
             certificate=certificate,
         )
 
-    # Helper evaluating whether later full payment is acceptable
+    # Evaluate whether later full payment is acceptable
     deadline_ok = (not respect_deadline) or (earliest_date is not None and earliest_date <= request.desired_completion_date)
     is_later_date = (earliest_date is not None and earliest_date > request.request_date)
     method_ok = (not require_full_payment_preference_for_later) or user_accepts_full_payment
@@ -307,7 +319,8 @@ def classify_affordability(
     # PRECEDENCE LEVEL 5: Plan Feasibility Unknown (plan_valid is None)
     # =========================================================================
     # Downstream payment-plan layer has not evaluated this request yet.
-    # Determine what the provisional fallback would be if no plan exists:
+    # Expose uncertainty via is_provisional and requires_payment_plan_evaluation.
+    # The status holds the conservative fallback value from the four official statuses.
     if is_affordable_later_eligible and earliest_date is not None:
         fallback_status = AffordabilityStatus.AFFORDABLE_LATER
         fallback_reason = f"Full amount safe from {earliest_date.isoformat()} (provisional; pending payment plan evaluation)."
@@ -322,25 +335,17 @@ def classify_affordability(
         else:
             fallback_reason = "Earliest full payment exceeds deadline (provisional; pending payment plan evaluation)."
 
-    if allow_provisional:
-        status = fallback_status
-        reason = fallback_reason
-    else:
-        status = AffordabilityStatus.PLAN_EVALUATION_REQUIRED
-        reason = f"Full amount not safe today; requires payment-plan evaluation (provisional fallback: {fallback_status.value})."
-
     return AffordabilityResult(
         request_id=request.request_id,
         user_id=request.user_id,
-        status=status,
+        status=fallback_status,
         requested_amount=req_amt,
         amount_safe_to_pay=safe_amt,
         earliest_date_for_full_payment=earliest_date,
-        reason=reason,
+        reason=fallback_reason,
         is_provisional=True,
         requires_payment_plan_evaluation=True,
         provisional_status=fallback_status,
         certificate_reference=cert_ref,
         certificate=certificate,
     )
-

@@ -424,19 +424,26 @@ class TestAffordabilityClassification(unittest.TestCase):
             amount_safe_to_pay=Decimal("100.00"),
             earliest_date=self.request_date + timedelta(days=30),
         )
-        # Default: strict plan_evaluation_required
-        res_strict = classify_affordability(cert, self.profile, self.request, payment_plan_feasible=None, allow_provisional=False)
-        self.assertEqual(res_strict.status, AffordabilityStatus.PLAN_EVALUATION_REQUIRED)
-        self.assertTrue(res_strict.is_provisional)
-        self.assertTrue(res_strict.requires_payment_plan_evaluation)
-        self.assertEqual(res_strict.provisional_status, AffordabilityStatus.AFFORDABLE_LATER)
+        res = classify_affordability(cert, self.profile, self.request, payment_plan_feasible=None)
+        # Status must strictly be one of the four contest statuses:
+        self.assertIn(res.status, (
+            AffordabilityStatus.AFFORDABLE_NOW,
+            AffordabilityStatus.AFFORDABLE_WITH_PLAN,
+            AffordabilityStatus.AFFORDABLE_LATER,
+            AffordabilityStatus.NOT_AFFORDABLE,
+        ))
+        self.assertEqual(res.status, AffordabilityStatus.AFFORDABLE_LATER)
+        self.assertTrue(res.is_provisional)
+        self.assertTrue(res.requires_payment_plan_evaluation)
+        self.assertEqual(res.provisional_status, AffordabilityStatus.AFFORDABLE_LATER)
 
-        # With allow_provisional=True
-        res_prov = classify_affordability(cert, self.profile, self.request, payment_plan_feasible=None, allow_provisional=True)
-        self.assertEqual(res_prov.status, AffordabilityStatus.AFFORDABLE_LATER)
-        self.assertTrue(res_prov.is_provisional)
-        self.assertTrue(res_prov.requires_payment_plan_evaluation)
-        self.assertEqual(res_prov.provisional_status, AffordabilityStatus.AFFORDABLE_LATER)
+    def test_affordability_status_enum_has_strictly_four_contest_values(self) -> None:
+        """Contest rule: AffordabilityStatus must contain strictly four values."""
+        self.assertEqual(len(AffordabilityStatus), 4)
+        expected_values = {"affordable_now", "affordable_with_plan", "affordable_later", "not_affordable"}
+        actual_values = {s.value for s in AffordabilityStatus}
+        self.assertEqual(actual_values, expected_values)
+
 
 
 class TestAffordabilityProperties(unittest.TestCase):
@@ -821,7 +828,253 @@ class TestAffordabilityProperties(unittest.TestCase):
         self.assertEqual(cert.amount_safe_to_pay, safe_amt_before)
         self.assertEqual(cert.earliest_date_for_full_payment, earliest_before)
 
+    # -------------------------------------------------------------------------
+    # PROPERTY 7: Changing only payment preference from accepting full_payment
+    # to rejecting full_payment must NEVER change financial capacity.
+    # -------------------------------------------------------------------------
+    def test_property_7_changing_payment_preference_does_not_change_financial_capacity(self) -> None:
+        req = FinancialRequest(
+            request_id="prop_req_7",
+            user_id=self.user_id,
+            request_date=self.request_date,
+            request_type="purchase",
+            requested_amount=Decimal("500.00"),
+            desired_completion_date=self.request_date + timedelta(days=60),
+            allows_partial_payment=True,
+            request_text="Testing property 7",
+        )
+        canonical_events: Sequence[CanonicalEvent] = []
+        future_events: Sequence[FutureEvent] = []
+
+        prof_accept = FinancialProfile(
+            user_id=self.user_id,
+            home_currency=self.home_currency,
+            current_available_balance=Decimal("2000.00"),
+            minimum_balance_to_keep=Decimal("500.00"),
+            financial_priorities=("savings",),
+            expense_categories_to_protect=(),
+            expense_categories_user_is_willing_to_reduce=(),
+            expense_categories_user_is_willing_to_stop=(),
+            payment_methods_user_will_consider=("full_payment", "installments"),
+            max_installment_months=6,
+        )
+
+        prof_reject = FinancialProfile(
+            user_id=self.user_id,
+            home_currency=self.home_currency,
+            current_available_balance=Decimal("2000.00"),
+            minimum_balance_to_keep=Decimal("500.00"),
+            financial_priorities=("savings",),
+            expense_categories_to_protect=(),
+            expense_categories_user_is_willing_to_reduce=(),
+            expense_categories_user_is_willing_to_stop=(),
+            payment_methods_user_will_consider=("installments", "partial_payment"),
+            max_installment_months=6,
+        )
+
+        base_accept = simulate_user(
+            user_id=self.user_id,
+            simulation_start=self.sim_start,
+            simulation_end=self.sim_end,
+            canonical_events=canonical_events,
+            future_events=future_events,
+            profile=prof_accept,
+        )
+        base_reject = simulate_user(
+            user_id=self.user_id,
+            simulation_start=self.sim_start,
+            simulation_end=self.sim_end,
+            canonical_events=canonical_events,
+            future_events=future_events,
+            profile=prof_reject,
+        )
+
+        cert_accept = evaluate_request_safe_to_pay(req, base_accept, canonical_events, future_events, prof_accept)
+        cert_reject = evaluate_request_safe_to_pay(req, base_reject, canonical_events, future_events, prof_reject)
+
+        # Simulator outputs must be strictly identical
+        self.assertEqual(base_accept.minimum_projected_available_cash, base_reject.minimum_projected_available_cash)
+        self.assertEqual(base_accept.ending_state.available_cash, base_reject.ending_state.available_cash)
+
+        # Financial capacity measures must be strictly identical
+        self.assertEqual(cert_accept.amount_safe_to_pay, cert_reject.amount_safe_to_pay)
+        self.assertEqual(cert_accept.earliest_date_for_full_payment, cert_reject.earliest_date_for_full_payment)
+        self.assertEqual(cert_accept.safety_floor, cert_reject.safety_floor)
+
+        # Only affordability classification may change:
+        res_accept = classify_affordability(cert_accept, prof_accept, req)
+        res_reject = classify_affordability(cert_reject, prof_reject, req)
+
+        self.assertEqual(res_accept.status, AffordabilityStatus.AFFORDABLE_NOW)
+        self.assertFalse(res_accept.requires_payment_plan_evaluation)
+
+        self.assertNotEqual(res_reject.status, AffordabilityStatus.AFFORDABLE_NOW)
+        self.assertTrue(res_reject.requires_payment_plan_evaluation)
+
+
+class TestProvisionalCaseMatrix(unittest.TestCase):
+    """Explicit matrix tests for Section 7 (Cases A through J)."""
+
+    def setUp(self) -> None:
+        self.user_id = "matrix_user"
+        self.request_date = date(2025, 1, 1)
+        self.sim_start = self.request_date
+        self.sim_end = self.request_date + timedelta(days=90)
+        self.currency = "USD"
+
+        self.profile_accept_full = FinancialProfile(
+            user_id=self.user_id,
+            home_currency=self.currency,
+            current_available_balance=Decimal("1000.00"),
+            minimum_balance_to_keep=Decimal("200.00"),
+            financial_priorities=(),
+            expense_categories_to_protect=(),
+            expense_categories_user_is_willing_to_reduce=(),
+            expense_categories_user_is_willing_to_stop=(),
+            payment_methods_user_will_consider=("full_payment", "installments"),
+            max_installment_months=6,
+        )
+
+        self.profile_reject_full = FinancialProfile(
+            user_id=self.user_id,
+            home_currency=self.currency,
+            current_available_balance=Decimal("1000.00"),
+            minimum_balance_to_keep=Decimal("200.00"),
+            financial_priorities=(),
+            expense_categories_to_protect=(),
+            expense_categories_user_is_willing_to_reduce=(),
+            expense_categories_user_is_willing_to_stop=(),
+            payment_methods_user_will_consider=("installments", "partial_payment"),
+            max_installment_months=6,
+        )
+
+        self.request = FinancialRequest(
+            request_id="req_matrix",
+            user_id=self.user_id,
+            request_date=self.request_date,
+            request_type="purchase",
+            requested_amount=Decimal("500.00"),
+            desired_completion_date=self.request_date + timedelta(days=60),
+            allows_partial_payment=True,
+            request_text="Matrix test",
+        )
+
+    def _make_cert(
+        self,
+        requested_amount: Decimal,
+        amount_safe_to_pay: Decimal,
+        earliest_date: Optional[date],
+    ) -> SafeToPayCertificate:
+        is_full = (amount_safe_to_pay == requested_amount)
+        return SafeToPayCertificate(
+            request_id=self.request.request_id,
+            user_id=self.user_id,
+            request_date=self.request_date,
+            simulation_start=self.sim_start,
+            simulation_end=self.sim_end,
+            requested_amount=requested_amount,
+            amount_safe_to_pay=amount_safe_to_pay,
+            currency=self.currency,
+            safety_floor=Decimal("200.00"),
+            baseline_minimum_available_cash=Decimal("1000.00"),
+            baseline_minimum_cash_date=self.request_date,
+            limiting_date=self.request_date,
+            available_cash_after_purchase_today=Decimal("1000.00") - amount_safe_to_pay,
+            minimum_available_cash_after_purchase=Decimal("500.00"),
+            safety_floor_margin=Decimal("300.00"),
+            earliest_date_for_full_payment=earliest_date,
+            is_full_payment_safe_today=is_full,
+            is_full_payment_safe_later=(earliest_date is not None and earliest_date > self.request_date),
+            reason_if_unsafe=None if is_full else "Not fully safe today",
+            candidate_search_method="matrix",
+        )
+
+    # Matrix A: full safe today + full_payment accepted
+    def test_matrix_a_full_safe_accepted(self) -> None:
+        cert = self._make_cert(Decimal("500.00"), Decimal("500.00"), self.request_date)
+        res = classify_affordability(cert, self.profile_accept_full, self.request, payment_plan_feasible=None)
+        self.assertEqual(res.status, AffordabilityStatus.AFFORDABLE_NOW)
+        self.assertFalse(res.requires_payment_plan_evaluation)
+        self.assertFalse(res.is_provisional)
+
+    # Matrix B: full safe today + full_payment rejected
+    def test_matrix_b_full_safe_rejected(self) -> None:
+        cert = self._make_cert(Decimal("500.00"), Decimal("500.00"), self.request_date)
+        res = classify_affordability(cert, self.profile_reject_full, self.request, payment_plan_feasible=None)
+        self.assertNotEqual(res.status, AffordabilityStatus.AFFORDABLE_NOW)
+        self.assertTrue(res.requires_payment_plan_evaluation)
+        self.assertTrue(res.is_provisional)
+        self.assertEqual(res.status, AffordabilityStatus.NOT_AFFORDABLE)  # conservative fallback
+
+    # Matrix C: partial safe today + plan unknown
+    def test_matrix_c_partial_safe_plan_unknown(self) -> None:
+        cert = self._make_cert(Decimal("500.00"), Decimal("200.00"), self.request_date + timedelta(days=20))
+        res = classify_affordability(cert, self.profile_accept_full, self.request, payment_plan_feasible=None)
+        self.assertTrue(res.requires_payment_plan_evaluation)
+        self.assertTrue(res.is_provisional)
+        self.assertEqual(res.status, AffordabilityStatus.AFFORDABLE_LATER)  # conservative fallback
+
+    # Matrix D: zero safe today + plan unknown
+    def test_matrix_d_zero_safe_plan_unknown(self) -> None:
+        cert = self._make_cert(Decimal("500.00"), Decimal("0.00"), None)
+        res = classify_affordability(cert, self.profile_accept_full, self.request, payment_plan_feasible=None)
+        self.assertTrue(res.requires_payment_plan_evaluation)
+        self.assertTrue(res.is_provisional)
+        self.assertEqual(res.status, AffordabilityStatus.NOT_AFFORDABLE)  # conservative fallback
+
+    # Matrix E: partial safe today + plan feasible
+    def test_matrix_e_partial_safe_plan_feasible(self) -> None:
+        cert = self._make_cert(Decimal("500.00"), Decimal("200.00"), self.request_date + timedelta(days=20))
+        res = classify_affordability(cert, self.profile_accept_full, self.request, payment_plan_feasible=True)
+        self.assertEqual(res.status, AffordabilityStatus.AFFORDABLE_WITH_PLAN)
+        self.assertFalse(res.requires_payment_plan_evaluation)
+        self.assertFalse(res.is_provisional)
+
+    # Matrix F: partial safe today + plan infeasible + later date
+    def test_matrix_f_partial_safe_plan_infeasible_later_date(self) -> None:
+        later_d = self.request_date + timedelta(days=20)
+        cert = self._make_cert(Decimal("500.00"), Decimal("200.00"), later_d)
+        res = classify_affordability(cert, self.profile_accept_full, self.request, payment_plan_feasible=False)
+        self.assertEqual(res.status, AffordabilityStatus.AFFORDABLE_LATER)
+        self.assertEqual(res.earliest_date_for_full_payment, later_d)
+        self.assertFalse(res.requires_payment_plan_evaluation)
+        self.assertFalse(res.is_provisional)
+
+    # Matrix G: partial safe today + plan infeasible + no later date
+    def test_matrix_g_partial_safe_plan_infeasible_no_later_date(self) -> None:
+        cert = self._make_cert(Decimal("500.00"), Decimal("200.00"), None)
+        res = classify_affordability(cert, self.profile_accept_full, self.request, payment_plan_feasible=False)
+        self.assertEqual(res.status, AffordabilityStatus.NOT_AFFORDABLE)
+        self.assertIsNone(res.earliest_date_for_full_payment)
+        self.assertFalse(res.requires_payment_plan_evaluation)
+        self.assertFalse(res.is_provisional)
+
+    # Matrix H: full safe today + full_payment rejected + plan feasible
+    def test_matrix_h_full_safe_rejected_plan_feasible(self) -> None:
+        cert = self._make_cert(Decimal("500.00"), Decimal("500.00"), self.request_date)
+        res = classify_affordability(cert, self.profile_reject_full, self.request, payment_plan_feasible=True)
+        self.assertEqual(res.status, AffordabilityStatus.AFFORDABLE_WITH_PLAN)
+        self.assertFalse(res.requires_payment_plan_evaluation)
+        self.assertFalse(res.is_provisional)
+
+    # Matrix I: full safe today + full_payment rejected + plan infeasible
+    def test_matrix_i_full_safe_rejected_plan_infeasible(self) -> None:
+        cert = self._make_cert(Decimal("500.00"), Decimal("500.00"), self.request_date)
+        res = classify_affordability(cert, self.profile_reject_full, self.request, payment_plan_feasible=False)
+        self.assertEqual(res.status, AffordabilityStatus.NOT_AFFORDABLE)
+        self.assertFalse(res.requires_payment_plan_evaluation)
+        self.assertFalse(res.is_provisional)
+
+    # Matrix J: full unsafe today + plan feasible
+    def test_matrix_j_full_unsafe_plan_feasible(self) -> None:
+        cert = self._make_cert(Decimal("500.00"), Decimal("0.00"), None)
+        res = classify_affordability(cert, self.profile_accept_full, self.request, payment_plan_feasible=True)
+        self.assertEqual(res.status, AffordabilityStatus.AFFORDABLE_WITH_PLAN)
+        self.assertFalse(res.requires_payment_plan_evaluation)
+        self.assertFalse(res.is_provisional)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

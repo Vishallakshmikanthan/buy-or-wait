@@ -50,12 +50,10 @@ def run_affordability_smoke_test() -> None:
     print("\nEvaluating affordability across all 250 evaluation requests...")
     t0 = time.perf_counter()
 
-    strict_results: Dict[str, AffordabilityResult] = {}
     provisional_results: Dict[str, AffordabilityResult] = {}
     no_plan_results: Dict[str, AffordabilityResult] = {}
     certificates: Dict[str, SafeToPayCertificate] = {}
 
-    strict_status_counts = Counter()
     provisional_status_counts = Counter()
     no_plan_status_counts = Counter()
 
@@ -89,36 +87,24 @@ def run_affordability_smoke_test() -> None:
         )
         certificates[req.request_id] = cert
 
-        # 1. Strict evaluation (payment_plan_feasible=None, allow_provisional=False)
-        res_strict = classify_affordability(
-            certificate=cert,
-            profile=prof,
-            request=req,
-            payment_plan_feasible=None,
-            allow_provisional=False,
-        )
-        strict_results[req.request_id] = res_strict
-        strict_status_counts[res_strict.status.value] += 1
-
-        if res_strict.status == AffordabilityStatus.AFFORDABLE_NOW:
-            definitively_affordable_now += 1
-        if res_strict.requires_payment_plan_evaluation:
-            requires_plan_eval_count += 1
-        if cert.is_full_payment_safe_today and "full_payment" not in prof.payment_methods_user_will_consider:
-            full_safe_but_refuses_full += 1
-
-        # 2. Provisional evaluation (payment_plan_feasible=None, allow_provisional=True)
+        # 1. Classification when payment_plan_feasible=None (plan layer has not run yet)
         res_prov = classify_affordability(
             certificate=cert,
             profile=prof,
             request=req,
             payment_plan_feasible=None,
-            allow_provisional=True,
         )
         provisional_results[req.request_id] = res_prov
         provisional_status_counts[res_prov.status.value] += 1
 
-        # 3. Counterfactual: if downstream plan layer proves NO valid plan exists (payment_plan_feasible=False)
+        if not res_prov.requires_payment_plan_evaluation and res_prov.status == AffordabilityStatus.AFFORDABLE_NOW:
+            definitively_affordable_now += 1
+        if res_prov.requires_payment_plan_evaluation:
+            requires_plan_eval_count += 1
+        if cert.is_full_payment_safe_today and "full_payment" not in prof.payment_methods_user_will_consider:
+            full_safe_but_refuses_full += 1
+
+        # 2. Counterfactual: if downstream plan layer proves NO valid plan exists (payment_plan_feasible=False)
         res_noplan = classify_affordability(
             certificate=cert,
             profile=prof,
@@ -129,7 +115,7 @@ def run_affordability_smoke_test() -> None:
         no_plan_status_counts[res_noplan.status.value] += 1
 
     total_eval_time = time.perf_counter() - t0
-    print(f"Evaluated all {len(strict_results)} requests in {total_eval_time:.3f}s ({total_eval_time/len(ds.requests)*1000:.2f}ms/request)")
+    print(f"Evaluated all {len(provisional_results)} requests in {total_eval_time:.3f}s ({total_eval_time/len(ds.requests)*1000:.2f}ms/request)")
 
     print("\n" + "=" * 50)
     print("AFFORDABILITY REAL-DATA AUDIT REPORT (250 REQUESTS)")
@@ -141,10 +127,6 @@ def run_affordability_smoke_test() -> None:
     print(f"  - Partial safe today:                       128")
     print(f"  - Zero safe today:                          33")
 
-    print("\n--- Strict Classification Counts (Plan Feasibility Unknown) ---")
-    for s, c in sorted(strict_status_counts.items()):
-        print(f"  {s:<30}: {c:>3} ({c/250*100:5.1f}%)")
-
     print("\n--- Provisional Status Counts (Fallback if No Plan Exists) ---")
     for s, c in sorted(provisional_status_counts.items()):
         print(f"  {s:<30}: {c:>3} ({c/250*100:5.1f}%)")
@@ -152,6 +134,23 @@ def run_affordability_smoke_test() -> None:
     print("\n--- Counterfactual Status Counts (Assuming PaymentPlanFeasible=False) ---")
     for s, c in sorted(no_plan_status_counts.items()):
         print(f"  {s:<30}: {c:>3} ({c/250*100:5.1f}%)")
+
+    # Invariant: Strictly zero status values outside the 4 contest statuses
+    valid_contest_statuses = {
+        AffordabilityStatus.AFFORDABLE_NOW.value,
+        AffordabilityStatus.AFFORDABLE_WITH_PLAN.value,
+        AffordabilityStatus.AFFORDABLE_LATER.value,
+        AffordabilityStatus.NOT_AFFORDABLE.value,
+    }
+    invalid_provisional_statuses = [
+        res.status.value for res in provisional_results.values() if res.status.value not in valid_contest_statuses
+    ]
+    invalid_noplan_statuses = [
+        res.status.value for res in no_plan_results.values() if res.status.value not in valid_contest_statuses
+    ]
+    print(f"\nFinal status values outside the 4 contest statuses: {len(invalid_provisional_statuses)}")
+    assert len(invalid_provisional_statuses) == 0, f"Found invalid statuses: {invalid_provisional_statuses}"
+    assert len(invalid_noplan_statuses) == 0, f"Found invalid statuses: {invalid_noplan_statuses}"
 
     print("\n" + "=" * 50)
     print("TARGETED AUDITS (8 REPRESENTATIVE ARCHETYPES)")
@@ -170,29 +169,29 @@ def run_affordability_smoke_test() -> None:
 
     for rid, title in sample_ids:
         cert = certificates[rid]
-        res_s = strict_results[rid]
         res_p = provisional_results[rid]
         print(f"\n--- {title} ---")
         print(f"Request:            {rid} (User: {cert.user_id}, Date: {cert.request_date}, Curr: {cert.currency})")
         print(f"Requested Amount:   {cert.requested_amount}")
         print(f"Safe to Pay Today:  {cert.amount_safe_to_pay}")
         print(f"Earliest Full Date: {cert.earliest_date_for_full_payment}")
-        print(f"Strict Status:      {res_s.status.value}")
-        print(f"Requires Plan Eval: {res_s.requires_payment_plan_evaluation}")
-        print(f"Provisional Status: {res_p.status.value}")
-        print(f"Reason:             {res_s.reason}")
+        print(f"Status:             {res_p.status.value}")
+        print(f"Requires Plan Eval: {res_p.requires_payment_plan_evaluation}")
+        print(f"Is Provisional:     {res_p.is_provisional}")
+        print(f"Reason:             {res_p.reason}")
 
     # Invariant assertions
-    assert len(strict_results) == 250
     assert len(provisional_results) == 250
     assert definitively_affordable_now == 66
     assert requires_plan_eval_count == 184
     assert provisional_status_counts["affordable_now"] == 66
     assert provisional_status_counts["affordable_later"] == 98
     assert provisional_status_counts["not_affordable"] == 86
+    assert "affordable_with_plan" not in provisional_status_counts or provisional_status_counts["affordable_with_plan"] == 0
     # Note: 63 never safe in 90d + 23 full safe today but refuses full payment = 86 not_affordable if no plan exists!
     print("\nAll 250 request invariants validated successfully.")
 
 
 if __name__ == "__main__":
     run_affordability_smoke_test()
+
