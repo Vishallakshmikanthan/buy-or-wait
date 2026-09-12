@@ -163,10 +163,19 @@ __all__ = [
     "SPENDING_TREND_THRESHOLD_RATIO",
     "AffordabilityStatus",
     "status_rank",
-    "PaymentPlanFeasibility",
     "AffordabilityCertificateReference",
     "AffordabilityResult",
     "classify_affordability",
+    "PaymentScheduleEntry",
+    "PaymentPlan",
+    "PaymentPlanSimulatorReference",
+    "PaymentPlanFeasibility",
+    "construct_payment_schedule",
+    "validate_option_schema",
+    "check_option_eligibility",
+    "evaluate_payment_option_feasibility",
+    "evaluate_payment_options_for_request",
+    "add_calendar_months",
 ]
 
 from .user_state import (
@@ -187,11 +196,24 @@ from .user_state import (
 from .affordability import (
     AffordabilityStatus,
     status_rank,
-    PaymentPlanFeasibility,
     AffordabilityCertificateReference,
     AffordabilityResult,
     classify_affordability,
 )
+
+from .payment_plan import (
+    PaymentScheduleEntry,
+    PaymentPlan,
+    PaymentPlanSimulatorReference,
+    PaymentPlanFeasibility,
+    construct_payment_schedule,
+    validate_option_schema,
+    check_option_eligibility,
+    evaluate_payment_option_feasibility,
+    evaluate_payment_options_for_request,
+    add_calendar_months,
+)
+
 
 
 
