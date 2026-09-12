@@ -222,9 +222,9 @@ def validate_option_schema(
     else:
         return f"unknown payment method: {option.payment_method}"
 
-    # 4. Total payable reconciliation (allow standard penny currency rounding <= 0.05)
+    # 4. Total payable reconciliation (exact contractual equality required)
     expected_payable = option.payment_amount * option.number_of_payments
-    if abs(expected_payable - option.total_payable_amount) > Decimal("0.05"):
+    if expected_payable != option.total_payable_amount:
         return (
             f"amount reconciliation failure: payment_amount ({option.payment_amount}) * "
             f"payments ({option.number_of_payments}) = {expected_payable} != "

@@ -882,5 +882,243 @@ class TestPaymentPlanProperties(unittest.TestCase):
         self.assertFalse(res.has_valid_plan)
 
 
+class TestPaymentPlanContractualAudit(unittest.TestCase):
+    """Specific contractual-semantics audit tests mandated by Prompt 9B."""
+
+    def setUp(self) -> None:
+        self.profile = make_profile()
+        self.request = make_request()
+
+    def test_money_reconciliation_exact_and_adversarial_tolerances(self) -> None:
+        """Section 2: Money reconciliation requires exact equality; reject 0.01, 0.02, 0.04, 0.05, 0.06."""
+        # Baseline: 3 payments of 400 = 1200
+        base_opt = PaymentOption(
+            payment_option_id="opt_recon",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("400.00"),
+            number_of_payments=3,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=30,
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        self.assertIsNone(validate_option_schema(base_opt, self.request))
+
+        # Adversarial discrepancies
+        adversarial_diffs = [
+            Decimal("0.01"),
+            Decimal("0.02"),
+            Decimal("0.04"),
+            Decimal("0.05"),
+            Decimal("0.06"),
+            Decimal("-0.01"),
+            Decimal("-0.05"),
+        ]
+        for diff in adversarial_diffs:
+            bad_opt = PaymentOption(
+                payment_option_id=f"opt_bad_{str(diff).replace('.', '_')}",
+                request_id="request_test",
+                payment_method="installments",
+                payment_amount=Decimal("400.00"),
+                number_of_payments=3,
+                first_payment_date=date(2026, 1, 1),
+                payment_frequency_days=30,
+                financing_fee=Decimal("0.00"),
+                total_payable_amount=Decimal("1200.00") + diff,
+            )
+            err = validate_option_schema(bad_opt, self.request)
+            self.assertIsNotNone(err, f"Expected rejection for reconciliation diff of {diff}")
+            self.assertIn("amount reconciliation failure", err)
+
+    def test_month_end_calendar_dates(self) -> None:
+        """Section 4: Exact month-end calendar math with leap year and varying month lengths."""
+        # Jan 31 + 1 month in non-leap year (2025) -> Feb 28
+        self.assertEqual(add_calendar_months(date(2025, 1, 31), 1), date(2025, 2, 28))
+        # Jan 31 + 1 month in leap year (2024) -> Feb 29
+        self.assertEqual(add_calendar_months(date(2024, 1, 31), 1), date(2024, 2, 29))
+        # Jan 31 + 2 months (2025) -> Mar 31
+        self.assertEqual(add_calendar_months(date(2025, 1, 31), 2), date(2025, 3, 31))
+        # Jan 31 + 3 months (2025) -> Apr 30
+        self.assertEqual(add_calendar_months(date(2025, 1, 31), 3), date(2025, 4, 30))
+        # Mar 31 + 1 month -> Apr 30
+        self.assertEqual(add_calendar_months(date(2025, 3, 31), 1), date(2025, 4, 30))
+        # May 31 + 1 month -> Jun 30
+        self.assertEqual(add_calendar_months(date(2025, 5, 31), 1), date(2025, 6, 30))
+        # Aug 31 + 1 month -> Sep 30
+        self.assertEqual(add_calendar_months(date(2025, 8, 31), 1), date(2025, 9, 30))
+        # Oct 31 + 1 month -> Nov 30
+        self.assertEqual(add_calendar_months(date(2025, 10, 31), 1), date(2025, 11, 30))
+
+    def test_first_payment_date_offset_boundary(self) -> None:
+        """Section 4: Compare request_date + 2m vs first_payment_date + 2m."""
+        # request_date = 2026-01-01, first_payment_date = 2026-01-15, max_installment_months = 2.
+        # limit from first_payment_date = 2026-03-15.
+        # 3 payments of freq 28:
+        # P1 = 2026-01-15
+        # P2 = 2026-02-12
+        # P3 = 2026-03-12
+        # P3 (2026-03-12) <= limit (2026-03-15) -> ELIGIBLE.
+        prof = make_profile(max_installment_months=2)
+        req = make_request(request_date=date(2026, 1, 1))
+        opt = PaymentOption(
+            payment_option_id="opt_offset_bound",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("400.00"),
+            number_of_payments=3,
+            first_payment_date=date(2026, 1, 15),
+            payment_frequency_days=28,
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        res = evaluate_payment_option_feasibility(opt, req, prof, (), ())
+        self.assertTrue(res.is_eligible)
+
+    def test_distinct_simulator_events_for_installments(self) -> None:
+        """Section 10: Two installments on different dates produce distinct simulator events."""
+        plan = construct_payment_schedule(
+            PaymentOption(
+                payment_option_id="opt_two",
+                request_id="request_test",
+                payment_method="installments",
+                payment_amount=Decimal("500.00"),
+                number_of_payments=2,
+                first_payment_date=date(2026, 1, 1),
+                payment_frequency_days=30,
+                financing_fee=Decimal("0.00"),
+                total_payable_amount=Decimal("1000.00"),
+            ),
+            requested_amount=Decimal("1000.00"),
+        )
+        self.assertEqual(len(plan.entries), 2)
+        self.assertNotEqual(plan.entries[0].date, plan.entries[1].date)
+        self.assertEqual(plan.entries[0].amount, Decimal("500.00"))
+        self.assertEqual(plan.entries[1].amount, Decimal("500.00"))
+
+    def test_prompt_9b_property_1_schedule_entries_exact_count(self) -> None:
+        """PROPERTY 1: Payment schedule entries count exactly equals number_of_payments."""
+        for n in (2, 3, 4, 6, 15, 24):
+            opt = PaymentOption(
+                payment_option_id=f"opt_{n}",
+                request_id="request_test",
+                payment_method="installments",
+                payment_amount=Decimal("100.00"),
+                number_of_payments=n,
+                first_payment_date=date(2026, 1, 1),
+                payment_frequency_days=30,
+                financing_fee=Decimal("0.00"),
+                total_payable_amount=Decimal(str(100 * n)),
+            )
+            plan = construct_payment_schedule(opt, Decimal(str(100 * n)))
+            self.assertEqual(len(plan.entries), n)
+            self.assertEqual(plan.number_of_payments, n)
+
+    def test_prompt_9b_property_3_payment_option_id_invariance(self) -> None:
+        """PROPERTY 3: Changing payment_option_id only does not change economic feasibility."""
+        opt_a = PaymentOption(
+            payment_option_id="opt_alpha",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("400.00"),
+            number_of_payments=3,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=30,
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        opt_b = PaymentOption(
+            payment_option_id="opt_beta",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("400.00"),
+            number_of_payments=3,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=30,
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        res_a = evaluate_payment_option_feasibility(opt_a, self.request, self.profile, (), ())
+        res_b = evaluate_payment_option_feasibility(opt_b, self.request, self.profile, (), ())
+
+        self.assertEqual(res_a.is_eligible, res_b.is_eligible)
+        self.assertEqual(res_a.is_safe, res_b.is_safe)
+        self.assertEqual(res_a.minimum_available_cash, res_b.minimum_available_cash)
+        self.assertEqual(res_a.safety_floor, res_b.safety_floor)
+
+    def test_prompt_9b_property_5_financing_fee_monotonicity(self) -> None:
+        """PROPERTY 5: Increasing financing fee cannot make option safer if total outflow increases."""
+        opt_no_fee = PaymentOption(
+            payment_option_id="opt_no_fee",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("400.00"),
+            number_of_payments=3,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=30,
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        opt_with_fee = PaymentOption(
+            payment_option_id="opt_with_fee",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("500.00"),
+            number_of_payments=3,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=30,
+            financing_fee=Decimal("300.00"),
+            total_payable_amount=Decimal("1500.00"),
+        )
+        res_no_fee = evaluate_payment_option_feasibility(opt_no_fee, self.request, self.profile, (), ())
+        res_with_fee = evaluate_payment_option_feasibility(opt_with_fee, self.request, self.profile, (), ())
+
+        self.assertGreaterEqual(res_no_fee.minimum_available_cash, res_with_fee.minimum_available_cash)
+        if res_with_fee.is_safe:
+            self.assertTrue(res_no_fee.is_safe)
+
+    def test_prompt_9b_property_6_decreasing_max_months_cannot_make_eligible(self) -> None:
+        """PROPERTY 6: Decreasing max_installment_months cannot make an already-rejected option eligible."""
+        opt_6m = PaymentOption(
+            payment_option_id="opt_6m",
+            request_id="request_test",
+            payment_method="installments",
+            payment_amount=Decimal("200.00"),
+            number_of_payments=6,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=30,
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        # Already rejected at 4 months
+        prof_4m = make_profile(max_installment_months=4)
+        res_4m = evaluate_payment_option_feasibility(opt_6m, self.request, prof_4m, (), ())
+        self.assertFalse(res_4m.is_eligible)
+
+        # Decreasing further to 2 months cannot make it eligible
+        prof_2m = make_profile(max_installment_months=2)
+        res_2m = evaluate_payment_option_feasibility(opt_6m, self.request, prof_2m, (), ())
+        self.assertFalse(res_2m.is_eligible)
+
+    def test_prompt_9b_property_7_cross_request_ineligible(self) -> None:
+        """PROPERTY 7: Changing request_id so an option belongs to another request makes it ineligible."""
+        opt_other = PaymentOption(
+            payment_option_id="opt_cross",
+            request_id="request_unrelated_999",
+            payment_method="full_payment",
+            payment_amount=Decimal("1200.00"),
+            number_of_payments=1,
+            first_payment_date=date(2026, 1, 1),
+            payment_frequency_days=None,
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+        res = evaluate_payment_option_feasibility(opt_other, self.request, self.profile, (), ())
+        self.assertFalse(res.is_eligible)
+        self.assertFalse(res.is_safe)
+        self.assertIn("option belongs to different request", res.rejection_reason)
+
+
 if __name__ == "__main__":
     unittest.main()
+

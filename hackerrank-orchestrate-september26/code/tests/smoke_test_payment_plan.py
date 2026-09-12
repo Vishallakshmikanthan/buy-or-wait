@@ -188,6 +188,7 @@ def run_payment_plan_audit() -> None:
     num_only_full_safe = 0
     num_only_inst_safe = 0
     num_both_safe = 0
+    num_all_eligible_unsafe = 0
 
     for req in eval_requests:
         opts_with_feas = options_by_request.get(req.request_id, [])
@@ -203,6 +204,8 @@ def run_payment_plan_audit() -> None:
             num_at_least_one_safe += 1
         else:
             num_all_unsafe += 1
+            if len(eligible_opts) > 0:
+                num_all_eligible_unsafe += 1
 
         has_full_safe = any(f.plan_type == "full_payment" for f in safe_opts)
         has_inst_safe = any(f.plan_type == "installments" for f in safe_opts)
@@ -217,7 +220,8 @@ def run_payment_plan_audit() -> None:
     print(f"Zero eligible options:          {num_zero_eligible} ({num_zero_eligible/250*100:.1f}%)")
     print(f"At least one eligible option:   {num_at_least_one_eligible} ({num_at_least_one_eligible/250*100:.1f}%)")
     print(f"At least one safe option:       {num_at_least_one_safe} ({num_at_least_one_safe/250*100:.1f}%)")
-    print(f"All options unsafe / inelig:    {num_all_unsafe} ({num_all_unsafe/250*100:.1f}%)")
+    print(f"All eligible options unsafe:    {num_all_eligible_unsafe} ({num_all_eligible_unsafe/250*100:.1f}%)")
+    print(f"Total with no safe option:      {num_all_unsafe} ({num_all_unsafe/250*100:.1f}%)")
     print(f"Only full_payment safe:         {num_only_full_safe} ({num_only_full_safe/250*100:.1f}%)")
     print(f"Only installments safe:         {num_only_inst_safe} ({num_only_inst_safe/250*100:.1f}%)")
     print(f"Both full and installments safe:{num_both_safe} ({num_both_safe/250*100:.1f}%)")
