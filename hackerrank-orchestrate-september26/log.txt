@@ -3480,3 +3480,633 @@ parent_agent=none
 
 
 
+
+## [2026-09-13T03:24:00+05:30] Prompt 10B — Candidate Set Integrity Audit
+
+User Prompt (verbatim, secrets redacted):
+Prompt 10B — CANDIDATE SET INTEGRITY AUDIT
+
+Do NOT implement ranking, scoring, recommendation, output.csv, LLM explanation, or spending optimization.
+
+Candidate generation is implemented.
+
+This prompt exists ONLY to verify that the generated candidate universe is internally consistent and that no invalid/unsafe candidate can accidentally enter the later ranking layer.
+
+Do not modify frozen modules:
+
+- canonical.py
+- recurrence.py
+- simulator.py
+- safe_to_pay.py
+- user_state.py
+- affordability.py
+- payment_plan.py
+
+Agent Response Summary:
+Completed full integrity audit of candidate action generation layer across all 250 evaluation requests and 790 payment options. Reconciled 469 installment candidates vs 247 eligible payment options (469 is all eval installment CSV options retained for auditability; 247 is eligible options across the 790 raw options). Confirmed mutually exclusive accounting across all 777 generated candidates (191 rankable, 586 unrankable). Audited all 8 partial payment candidates and 50 wait candidates, verified exact Decimal arithmetic, 100% lineage completeness, and order-independence. Verified zero changes to frozen modules and passed all 104 unit/integrity tests. Committed under 845b55c.
+
+Actions:
+* ran audit_candidates.py across all 790 payment options and 250 requests
+* created code/tests/test_candidate_integrity.py covering requirements A-L (19/19 passing)
+* executed python -m unittest code/tests/test_candidate_generation.py (85/85 passing)
+* verified blob SHA-1 hashes of all 7 frozen modules match baselines exactly
+* committed changes under git commit 845b55c
+
+Context:
+tool=Antigravity
+branch=master
+repo_root=c:\Users\Lenovo\Downloads\buy-or-wait\hackerrank-orchestrate-september26
+worktree=main
+parent_agent=none
+
+
+
+
+## [2026-09-13T03:25:00+05:30] SESSION START
+
+tool=Antigravity
+Repo Root: c:\Users\Lenovo\Downloads\buy-or-wait\hackerrank-orchestrate-september26
+Branch: master
+Worktree: main
+Parent Agent: none
+Language: py
+Time Remaining: 14h 35m
+
+
+
+
+## [2026-09-13T03:31:00+05:30] Prompt 11 — Deterministic Specification-Faithful Ranking Engine
+
+User Prompt (verbatim, secrets redacted):
+Prompt 11 — DETERMINISTIC SPECIFICATION-FAITHFUL RANKING ENGINE
+
+We now have a verified candidate-generation layer.
+
+Frozen modules:
+
+- canonical.py
+- recurrence.py
+- simulator.py
+- safe_to_pay.py
+- user_state.py
+- affordability.py
+- payment_plan.py
+- candidate_generation.py
+
+Do NOT modify them.
+
+We are now implementing ONLY the deterministic ranking layer.
+
+The purpose is:
+
+Given the candidate set for one request, rank ONLY rankable candidates according to the exact contest specification.
+
+This is NOT an LLM task.
+
+This is NOT a weighted heuristic task.
+
+This is NOT a machine-learning task.
+
+This is NOT a subjective scoring system.
+
+Implement the specification as a deterministic lexicographic ordering.
+
+==================================================
+1. READ ACTUAL SOURCES FIRST
+==================================================
+
+Read:
+
+- AGENTS.md
+- problem_statement.md
+- code/candidate_generation.py
+- code/affordability.py
+- code/payment_plan.py
+- code/user_state.py
+- code/safe_to_pay.py
+- all candidate tests
+
+Search the actual sources for:
+
+- "Choosing Between Safe Plans"
+- "rank"
+- "eligible plan"
+- "safe plan"
+- "desired_completion_date"
+- "spending changes"
+- "total amount paid"
+- "start payment earlier"
+- "fewer payments"
+- "payment_option_id"
+- "partial_payment"
+- "wait"
+- "full_payment"
+
+Do NOT rely on previous reports.
+
+==================================================
+2. EXTRACT THE EXACT RANKING CONTRACT
+
+The previously audited specification contains language resembling:
+
+"When more than one eligible plan is safe, rank the plans in this order:
+
+1. Complete the full request by desired_completion_date.
+2. Require no spending changes.
+3. Minimize the total amount paid.
+4. Start payment earlier.
+5. Use fewer payments.
+6. Use the lowest payment_option_id as the final tie-breaker."
+
+Verify the EXACT wording from the actual source.
+
+Report each criterion and its precise semantics.
+
+Create:
+
+Criterion
+Source
+Input field
+Direction
+Tie behavior
+
+==================================================
+3. HARD GATE BEFORE RANKING
+
+Ranking must receive ONLY:
+
+candidate.is_rankable == True
+
+Do NOT allow:
+
+- unsafe candidates
+- contractually ineligible candidates
+- structurally invalid candidates
+
+into ranking.
+
+Add an assertion that ranking raises/rejects if a non-rankable candidate is supplied.
+
+This is a safety invariant.
+
+==================================================
+4. DO NOT INVENT A WEIGHTED SCORE
+
+Do NOT implement:
+
+score =
+  w1*x1 + w2*x2 + ...
+
+Do NOT choose arbitrary weights.
+
+Do NOT normalize fields.
+
+Do NOT use floating-point scores.
+
+The specification gives an ordered priority list.
+
+Implement a deterministic lexicographic key/comparator.
+
+==================================================
+5. CRITERION 1 — COMPLETE BY desired_completion_date
+
+Determine the exact binary criterion.
+
+For every candidate:
+
+deadline_met =
+    completion_date <= desired_completion_date
+
+Verify:
+
+- deadline-met candidates rank before deadline-missed candidates.
+- desired_completion_date itself is inclusive.
+- candidates beyond the deadline are not automatically discarded if the specification says deadline is ranking-only.
+
+Do NOT modify candidate feasibility.
+
+==================================================
+6. CRITERION 2 — SPENDING CHANGES
+
+Determine exactly how spending changes are represented.
+
+The candidate layer currently stores spending_changes.
+
+Determine:
+
+- what counts as "no spending changes"
+- whether an empty tuple/list means none
+- whether spending changes have a cost
+- whether number of changes matters at this criterion
+- whether candidate types without spending changes should all tie here
+
+Implement exactly the specification.
+
+Do NOT optimize spending changes yet.
+
+If the specification requires generating spending-change alternatives that candidate generation does not currently provide, STOP and report the gap instead of inventing alternatives.
+
+==================================================
+7. CRITERION 3 — MINIMIZE TOTAL AMOUNT PAID
+
+Determine exact definition.
+
+Possible values may differ because of:
+
+- financing fee
+- installment total payable
+- partial-payment
+- full payment
+- wait
+
+Use the specification's exact definition.
+
+Compare with Decimal.
+
+No float.
+
+Clarify whether "total amount paid" includes financing fees.
+
+Do not silently substitute requested amount.
+
+==================================================
+8. CRITERION 4 — START PAYMENT EARLIER
+
+Determine exact definition:
+
+first_payment_date
+
+or another date.
+
+Use the source.
+
+Earlier date must rank before later date.
+
+Same date → continue.
+
+==================================================
+9. CRITERION 5 — FEWER PAYMENTS
+
+Use the candidate's number of payments.
+
+Fewer must rank before more.
+
+Verify semantics for:
+
+- full payment = 1
+- wait = 1
+- partial payment = 2
+- installments = N
+
+Do not invent exceptions.
+
+==================================================
+10. CRITERION 6 — LOWEST payment_option_id
+
+Determine exactly how the specification handles candidates without a payment_option_id.
+
+Examples:
+
+- full_payment
+- partial_payment
+- wait
+
+Do NOT invent an arbitrary numeric ID such as 0.
+
+Determine whether:
+
+A. payment_option_id is only used to break ties among payment-option candidates
+B. non-option candidates require another deterministic tie-break
+C. the specification defines a special rule
+
+This is a critical edge case.
+
+==================================================
+11. FINAL TIE-BREAK DETERMINISM
+
+The specification may not fully order:
+
+- full payment
+- wait
+- partial payment
+
+if all business criteria tie.
+
+Do NOT silently add business preference.
+
+If a final technical tie-break is necessary for deterministic output:
+
+- distinguish business ranking from technical ordering
+- document it explicitly
+- ensure it cannot change a specification-defined preference
+
+Use a stable candidate_id only as a technical tie-break if necessary.
+
+==================================================
+12. CANDIDATE TYPES AND RANKING
+
+Construct synthetic examples involving:
+
+A. full payment vs installment
+B. full payment vs wait
+C. wait vs installment
+D. partial vs installment
+E. two installment options
+F. two identical schedules with different payment_option_id
+G. same payment date but different payment count
+H. same total cost but different first payment date
+I. deadline-met vs deadline-missed
+J. spending-change vs no-spending-change
+
+For every case show the expected ordering criterion by criterion.
+
+==================================================
+13. CRITICAL EDGE CASE
+
+Construct:
+
+Candidate A:
+- deadline met
+- no spending changes
+- total paid = 100
+- first payment = D
+- payments = 2
+
+Candidate B:
+- deadline met
+- spending changes required
+- total paid = 90
+- first payment = D
+- payments = 1
+
+Candidate A MUST outrank B if criterion 2 precedes criterion 3.
+
+Do NOT let lower total cost override higher-priority criteria.
+
+==================================================
+14. ANOTHER CRITICAL EDGE CASE
+
+Candidate A:
+- deadline met
+- no spending changes
+- total = 100
+- first payment = D+10
+- payments = 1
+
+Candidate B:
+- deadline met
+- no spending changes
+- total = 100
+- first payment = D
+- payments = 2
+
+B MUST outrank A because earlier start is criterion 4 and occurs before number of payments criterion 5.
+
+==================================================
+15. LEXICOGRAPHIC ORDER PROPERTY
+
+Verify:
+
+If candidate A is better on criterion k and equal on all criteria before k,
+A outranks B regardless of all lower-priority criteria.
+
+This is essential.
+
+Test all six criteria.
+
+==================================================
+16. ORDER INDEPENDENCE
+
+Ranking must be invariant to input candidate order.
+
+Given the same candidate set in any permutation:
+
+ranked output must be identical.
+
+Test random permutations.
+
+==================================================
+17. NO MUTATION
+
+Ranking must not mutate:
+
+- Candidate
+- CandidateSet
+- FinancialState
+- certificates
+- payment options
+
+Test object state before/after.
+
+==================================================
+18. DETERMINISM
+
+Repeated ranking on identical inputs must produce byte-for-byte-equivalent candidate ordering.
+
+No:
+
+- randomness
+- wall-clock time
+- hash-order dependence
+- dictionary iteration dependence
+
+==================================================
+19. REAL-DATA AUDIT
+
+Run ranking over all 250 evaluation requests.
+
+DO NOT generate output.csv yet.
+
+Report:
+
+- requests with zero rankable candidates
+- requests with one rankable candidate
+- requests with multiple rankable candidates
+- total rankable candidates
+- rankable candidates by type
+- top candidate type distribution
+
+BUT:
+
+Do NOT call these "recommendations" yet.
+
+They are merely rank #1 according to the deterministic comparator.
+
+Also report cases where:
+
+- deadline-missed candidate ranks above an on-time candidate — should be ZERO if both otherwise compete.
+- spending-change candidate outranks no-change candidate — should be impossible when all earlier criteria tie.
+- higher total cost outranks lower cost when earlier criteria tie — should be ZERO.
+- later first payment outranks earlier first payment when earlier criteria tie — should be ZERO.
+- more payments outranks fewer when earlier criteria tie — should be ZERO.
+
+==================================================
+20. TRACEABILITY
+
+For at least 15 requests with multiple rankable candidates, print:
+
+candidate
+criterion 1 result
+criterion 2 result
+criterion 3 value
+criterion 4 value
+criterion 5 value
+criterion 6 value
+final deterministic rank
+
+This is for auditability.
+
+==================================================
+21. TESTS
+
+Add tests for:
+
+- each ranking criterion
+- criterion precedence
+- deadline inclusive boundary
+- spending-change precedence
+- total paid Decimal comparison
+- earlier start
+- fewer payments
+- payment_option_id tie-break
+- candidates without payment_option_id
+- cross-type ties
+- deterministic ordering
+- permutation invariance
+- immutability
+- non-rankable rejection
+
+==================================================
+22. PROPERTY TESTS
+
+Add:
+
+PROPERTY 1:
+Input permutation does not change ranking.
+
+PROPERTY 2:
+Improving criterion k while holding all higher-priority criteria equal cannot worsen rank.
+
+PROPERTY 3:
+Worsening criterion k while holding all higher-priority criteria equal cannot improve rank.
+
+PROPERTY 4:
+A non-rankable candidate can never appear in ranked output.
+
+PROPERTY 5:
+Repeated ranking produces identical ordering.
+
+PROPERTY 6:
+Decimal total-cost comparison is exact.
+
+PROPERTY 7:
+Changing a lower-priority criterion cannot change ordering when a higher-priority criterion differs.
+
+==================================================
+23. SOURCE SILENCE RULE
+
+If any criterion is genuinely underspecified:
+
+DO NOT invent a business rule.
+
+Report:
+
+- explicit specification
+- ambiguity
+- safest deterministic interpretation
+- whether code should stop until clarified
+
+But if the source is explicit, implement it directly.
+
+==================================================
+24. UPSTREAM REGRESSION
+
+Verify hashes or equivalent integrity for:
+
+- canonical.py
+- recurrence.py
+- simulator.py
+- safe_to_pay.py
+- user_state.py
+- affordability.py
+- payment_plan.py
+- candidate_generation.py
+
+Expected:
+
+ZERO modifications.
+
+==================================================
+25. LOGGING
+
+Update log.txt according to AGENTS.md.
+
+Record:
+
+- Prompt 11
+- exact ranking contract
+- implementation
+- synthetic tests
+- properties
+- 250-request audit
+- traceability
+- commit hash
+
+==================================================
+26. HARD STOP
+
+DO NOT IMPLEMENT:
+
+- final recommendation output
+- output.csv
+- LLM explanation
+- spending-change optimization
+- new spending alternatives
+- UI
+- submission packaging
+
+STOP after deterministic ranking.
+
+==================================================
+FINAL RESPONSE
+
+Return:
+
+A. Exact source-backed ranking contract
+B. Criterion-by-criterion semantics
+C. Rankability gate
+D. Lexicographic implementation
+E. Cross-type tie handling
+F. Synthetic cases
+G. Property tests
+H. 250-request audit
+I. Traceability examples
+J. Determinism/permutation audit
+K. Mutation audit
+L. Upstream regression
+M. Tests/runtime
+N. Commit hash
+O. Explicit confirmation that NO final recommendation/output.csv/LLM logic was implemented
+
+analyse agents.md and update log.txt and then push the changes to the github repo
+
+Agent Response Summary:
+Implemented code/ranking.py providing the deterministic, specification-faithful ranking layer implementing the exact 6 contest criteria from problem_statement.md §'Choosing Between Safe Plans' (deadline-met inclusive, no spending changes, minimize total paid in Decimal, earlier first payment date, fewer payments, lowest payment_option_id tie-breaker) and technical tie-breaker on candidate_id. Enforced hard gate raising ValueError for non-rankable candidates. Created code/tests/test_ranking.py with 32 unit and property tests verifying all 7 mathematical properties, boundary conditions, precedence, immutability, and synthetic cases A-J. Ran full 250-request audit in audit_ranking.py confirming 191 rankable candidates, zero pairwise invariant violations, and zero modifications to frozen modules.
+
+Actions:
+* created code/ranking.py
+* created code/tests/test_ranking.py (32/32 tests passing)
+* created audit_ranking.py and executed full 250-request audit across dataset
+* verified all 444 tests in codebase pass (python -m unittest discover code/tests)
+* confirmed blob SHA-1 hashes of all 8 frozen modules match baselines exactly
+* updated log.txt according to AGENTS.md §5.1 and §5.2
+
+Context:
+tool=Antigravity
+branch=master
+repo_root=c:\Users\Lenovo\Downloads\buy-or-wait\hackerrank-orchestrate-september26
+worktree=main
+parent_agent=none
+
+
+
