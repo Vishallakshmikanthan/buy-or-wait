@@ -72,6 +72,16 @@ from .simulator import (
     simulated_event_from_canonical,
     simulated_event_from_future,
 )
+from .safe_to_pay import (
+    CURRENCY_QUANTUM,
+    SafeToPayCertificate,
+    get_currency_quantum,
+    make_candidate_purchase_event,
+    is_purchase_safe,
+    calculate_amount_safe_to_pay,
+    calculate_earliest_full_payment_date,
+    evaluate_request_safe_to_pay,
+)
 
 __all__ = [
     "FinancialProfile",
@@ -131,5 +141,14 @@ __all__ = [
     "simulate_user",
     "simulated_event_from_canonical",
     "simulated_event_from_future",
+    "CURRENCY_QUANTUM",
+    "SafeToPayCertificate",
+    "get_currency_quantum",
+    "make_candidate_purchase_event",
+    "is_purchase_safe",
+    "calculate_amount_safe_to_pay",
+    "calculate_earliest_full_payment_date",
+    "evaluate_request_safe_to_pay",
 ]
+
 
