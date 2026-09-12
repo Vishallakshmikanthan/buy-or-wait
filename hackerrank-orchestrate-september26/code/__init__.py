@@ -149,6 +149,28 @@ __all__ = [
     "calculate_amount_safe_to_pay",
     "calculate_earliest_full_payment_date",
     "evaluate_request_safe_to_pay",
+    "SpendingTrend",
+    "IncomeStability",
+    "ExpenseStability",
+    "RecurringStreamSummary",
+    "UpcomingObligationSummary",
+    "UserFinancialState",
+    "compute_monthly_equivalent",
+    "build_user_financial_state",
+    "evaluate_user_financial_state",
 ]
+
+from .user_state import (
+    SpendingTrend,
+    IncomeStability,
+    ExpenseStability,
+    RecurringStreamSummary,
+    UpcomingObligationSummary,
+    UserFinancialState,
+    compute_monthly_equivalent,
+    build_user_financial_state,
+    evaluate_user_financial_state,
+)
+
 
 
