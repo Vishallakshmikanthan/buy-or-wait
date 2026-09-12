@@ -707,6 +707,118 @@ class TestDecisionCertificate(unittest.TestCase):
         with self.assertRaises(CertificateValidationError):
             fail_res.raise_if_invalid()
 
+    # 30. Canonical JSON preserves all six ranking criteria
+    def test_30_canonical_json_preserves_all_six_criteria(self) -> None:
+        c_inst = _make_candidate(
+            "c_inst",
+            candidate_type=CandidateType.INSTALLMENT_PLAN,
+            total_amount_paid=Decimal("10500"),
+            number_of_payments=3,
+            source_payment_option_id="opt_1",
+        )
+        dec = make_final_decision(self.ctx, [c_inst])
+        cert = build_decision_certificate(dec, context=self.ctx, candidate_set=[c_inst])
+
+        c_json = cert.to_canonical_json()
+        self.assertIn('"criterion_1_deadline_met":true', c_json)
+        self.assertIn('"criterion_2_no_spending_changes":true', c_json)
+        self.assertIn('"criterion_3_total_amount_paid":"10500"', c_json)
+        self.assertIn('"criterion_4_first_payment_date":"2026-03-01"', c_json)
+        self.assertIn('"criterion_5_number_of_payments":3', c_json)
+        self.assertIn('"criterion_6_payment_option_id":"opt_1"', c_json)
+        self.assertIn('"technical_tiebreaker_payment_option_id":"opt_1"', c_json)
+
+    # 31. Changing criterion 6 changes canonical JSON and SHA-256 hash
+    def test_31_changing_criterion_6_changes_canonical_json_and_hash(self) -> None:
+        c_inst = _make_candidate(
+            "c_inst",
+            candidate_type=CandidateType.INSTALLMENT_PLAN,
+            total_amount_paid=Decimal("10500"),
+            number_of_payments=3,
+            source_payment_option_id="opt_1",
+        )
+        dec = make_final_decision(self.ctx, [c_inst])
+        cert = build_decision_certificate(dec, context=self.ctx, candidate_set=[c_inst])
+
+        orig_json = cert.to_canonical_json()
+        orig_hash = certificate_hash(cert)
+
+        # Alter criterion 6
+        alt_trace = RankingTraceEvidence(
+            candidate_id=cert.ranking_criteria_trace.candidate_id,
+            deadline_met=cert.ranking_criteria_trace.deadline_met,
+            no_spending_changes=cert.ranking_criteria_trace.no_spending_changes,
+            total_amount_paid=cert.ranking_criteria_trace.total_amount_paid,
+            first_payment_date=cert.ranking_criteria_trace.first_payment_date,
+            number_of_payments=cert.ranking_criteria_trace.number_of_payments,
+            criterion_6_payment_option_id="opt_999",
+            technical_tiebreaker_payment_option_id="opt_999",
+            technical_tie_breaker=cert.ranking_criteria_trace.technical_tie_breaker,
+        )
+        alt_cert = copy.copy(cert)
+        object.__setattr__(alt_cert, "ranking_criteria_trace", alt_trace)
+
+        new_json = alt_cert.to_canonical_json()
+        new_hash = certificate_hash(alt_cert)
+
+        self.assertNotEqual(orig_json, new_json)
+        self.assertNotEqual(orig_hash, new_hash)
+
+    # 32. Changing criterion 6 cannot silently pass validation against source decision
+    def test_32_changing_criterion_6_fails_validation(self) -> None:
+        c_inst = _make_candidate(
+            "c_inst",
+            candidate_type=CandidateType.INSTALLMENT_PLAN,
+            total_amount_paid=Decimal("10500"),
+            number_of_payments=3,
+            source_payment_option_id="opt_1",
+        )
+        dec = make_final_decision(self.ctx, [c_inst])
+        cert = build_decision_certificate(dec, context=self.ctx, candidate_set=[c_inst])
+
+        # Alter criterion 6 on certificate
+        alt_trace = RankingTraceEvidence(
+            candidate_id=cert.ranking_criteria_trace.candidate_id,
+            deadline_met=cert.ranking_criteria_trace.deadline_met,
+            no_spending_changes=cert.ranking_criteria_trace.no_spending_changes,
+            total_amount_paid=cert.ranking_criteria_trace.total_amount_paid,
+            first_payment_date=cert.ranking_criteria_trace.first_payment_date,
+            number_of_payments=cert.ranking_criteria_trace.number_of_payments,
+            criterion_6_payment_option_id="altered_option",
+            technical_tiebreaker_payment_option_id="altered_option",
+            technical_tie_breaker=cert.ranking_criteria_trace.technical_tie_breaker,
+        )
+        alt_cert = copy.copy(cert)
+        object.__setattr__(alt_cert, "ranking_criteria_trace", alt_trace)
+
+        res = validate_certificate(alt_cert, dec)
+        self.assertFalse(res.is_valid)
+        self.assertTrue(any("criterion_6_payment_option_id mismatch" in e for e in res.errors))
+
+    # 33. Competing candidates preserve all 6 criteria and decisive criterion
+    def test_33_competing_candidates_all_six_criteria_and_decisive(self) -> None:
+        c_inst = _make_candidate(
+            "c_inst",
+            candidate_type=CandidateType.INSTALLMENT_PLAN,
+            total_amount_paid=Decimal("10500"),
+            number_of_payments=3,
+            source_payment_option_id="opt_1",
+        )
+        dec_multi = make_final_decision(self.ctx, [self.c1, c_inst])
+        cert = build_decision_certificate(dec_multi, context=self.ctx, candidate_set=[self.c1, c_inst])
+
+        self.assertEqual(len(cert.competing_candidates), 2)
+        winner = cert.competing_candidates[0]
+        loser = cert.competing_candidates[1]
+
+        self.assertTrue(winner.is_winner)
+        self.assertIsNone(winner.decisive_criterion)
+
+        self.assertFalse(loser.is_winner)
+        # Lost on total_amount_paid (10000 vs 10500)
+        self.assertEqual(loser.decisive_criterion, "CRITERION_3_TOTAL_AMOUNT_PAID")
+        self.assertEqual(loser.criterion_6_payment_option_id, "opt_1")
+
 
 if __name__ == "__main__":
     unittest.main()

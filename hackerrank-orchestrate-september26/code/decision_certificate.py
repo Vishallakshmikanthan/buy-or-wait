@@ -117,28 +117,61 @@ class EvidenceRef:
 
 @dataclass(frozen=True)
 class RankingTraceEvidence:
-    """Structured ranking trace for the top-ranked candidate."""
+    """Structured ranking trace for the top-ranked candidate across all 6 criteria."""
     candidate_id: str
     deadline_met: bool
     no_spending_changes: bool
     total_amount_paid: Decimal
     first_payment_date: Optional[date]
     number_of_payments: int
+    criterion_6_payment_option_id: Optional[str] = None
+    technical_tiebreaker_payment_option_id: Optional[str] = None
+    technical_tie_breaker: Optional[str] = None
+
+    @property
+    def criterion_1_deadline_met(self) -> bool:
+        return self.deadline_met
+
+    @property
+    def criterion_2_no_spending_changes(self) -> bool:
+        return self.no_spending_changes
+
+    @property
+    def criterion_3_total_amount_paid(self) -> Decimal:
+        return self.total_amount_paid
+
+    @property
+    def criterion_4_first_payment_date(self) -> Optional[date]:
+        return self.first_payment_date
+
+    @property
+    def criterion_5_number_of_payments(self) -> int:
+        return self.number_of_payments
 
     def to_canonical_dict(self) -> Dict[str, Any]:
+        opt_id = self.criterion_6_payment_option_id or self.technical_tiebreaker_payment_option_id
         return {
             "candidate_id": self.candidate_id,
+            "criterion_1_deadline_met": self.deadline_met,
+            "criterion_2_no_spending_changes": self.no_spending_changes,
+            "criterion_3_total_amount_paid": str(self.total_amount_paid),
+            "criterion_4_first_payment_date": self.first_payment_date.isoformat() if self.first_payment_date else None,
+            "criterion_5_number_of_payments": self.number_of_payments,
+            "criterion_6_payment_option_id": opt_id,
             "deadline_met": self.deadline_met,
             "first_payment_date": self.first_payment_date.isoformat() if self.first_payment_date else None,
             "no_spending_changes": self.no_spending_changes,
             "number_of_payments": self.number_of_payments,
+            "payment_option_id": opt_id,
+            "technical_tie_breaker": self.technical_tie_breaker,
+            "technical_tiebreaker_payment_option_id": opt_id,
             "total_amount_paid": str(self.total_amount_paid),
         }
 
 
 @dataclass(frozen=True)
 class CompetingCandidateEvidence:
-    """Structured evidence for competing candidates in ranking order."""
+    """Structured evidence for competing candidates in ranking order across all 6 criteria."""
     candidate_id: str
     rank: int
     payment_method: str
@@ -149,18 +182,39 @@ class CompetingCandidateEvidence:
     payment_count: int
     payment_option_id: Optional[str]
     is_safe: bool
+    criterion_1_deadline_met: bool = True
+    criterion_2_no_spending_changes: bool = True
+    criterion_3_total_amount_paid: Optional[Decimal] = None
+    criterion_4_first_payment_date: Optional[date] = None
+    criterion_5_number_of_payments: Optional[int] = None
+    criterion_6_payment_option_id: Optional[str] = None
+    decisive_criterion: Optional[str] = None
+    is_winner: bool = False
 
     def to_canonical_dict(self) -> Dict[str, Any]:
+        opt_id = self.criterion_6_payment_option_id if self.criterion_6_payment_option_id is not None else self.payment_option_id
+        t_amt = self.criterion_3_total_amount_paid if self.criterion_3_total_amount_paid is not None else self.total_amount_paid
+        f_date = self.criterion_4_first_payment_date if self.criterion_4_first_payment_date is not None else self.start_date
+        n_pay = self.criterion_5_number_of_payments if self.criterion_5_number_of_payments is not None else self.payment_count
         return {
             "candidate_id": self.candidate_id,
+            "criterion_1_deadline_met": self.criterion_1_deadline_met,
+            "criterion_2_no_spending_changes": self.criterion_2_no_spending_changes,
+            "criterion_3_total_amount_paid": str(t_amt),
+            "criterion_4_first_payment_date": f_date.isoformat() if f_date else None,
+            "criterion_5_number_of_payments": n_pay,
+            "criterion_6_payment_option_id": opt_id,
             "deadline_met": self.deadline_met,
+            "decisive_criterion": self.decisive_criterion,
             "is_safe": self.is_safe,
+            "is_winner": self.is_winner,
             "payment_count": self.payment_count,
             "payment_method": self.payment_method,
             "payment_option_id": self.payment_option_id,
             "rank": self.rank,
             "spending_changes_required": self.spending_changes_required,
             "start_date": self.start_date.isoformat() if self.start_date else None,
+            "technical_tiebreaker_payment_option_id": opt_id,
             "total_amount_paid": str(self.total_amount_paid),
         }
 
@@ -438,6 +492,9 @@ def build_decision_certificate(
             total_amount_paid=t.criterion_3_total_amount_paid,
             first_payment_date=t.criterion_4_first_payment_date,
             number_of_payments=t.criterion_5_number_of_payments,
+            criterion_6_payment_option_id=t.criterion_6_payment_option_id,
+            technical_tiebreaker_payment_option_id=t.criterion_6_payment_option_id,
+            technical_tie_breaker=t.technical_tie_breaker,
         )
 
     # 2. Competing Candidates Evidence
@@ -452,43 +509,69 @@ def build_decision_certificate(
         candidates_pool = [selected_c]
 
     c_by_id: Dict[str, Candidate] = {c.candidate_id: c for c in candidates_pool}
+    top_cand: Optional[Candidate] = None
+    if decision.ranked_candidate_ids:
+        top_cand = c_by_id.get(decision.ranked_candidate_ids[0]) or selected_c
+    elif selected_c is not None:
+        top_cand = selected_c
+
+    desired_d = decision.explanation_evidence.desired_completion_date
 
     competing_candidates: List[CompetingCandidateEvidence] = []
     for rank_idx, c_id in enumerate(decision.ranked_candidate_ids, start=1):
-        if c_id in c_by_id:
-            c = c_by_id[c_id]
+        c = c_by_id.get(c_id) or (selected_c if c_id == selected_c_id else None)
+        if c is not None:
             d_met = (
-                (c.completion_date <= decision.explanation_evidence.desired_completion_date)
+                (c.completion_date <= desired_d)
                 if c.completion_date else False
             )
+            no_sc = (len(c.spending_changes) == 0)
+            is_winner = (rank_idx == 1)
+            decisive_crit: Optional[str] = None
+            if not is_winner and top_cand is not None:
+                top_d_met = (
+                    (top_cand.completion_date <= desired_d)
+                    if top_cand.completion_date else False
+                )
+                top_no_sc = (len(top_cand.spending_changes) == 0)
+                if top_d_met != d_met:
+                    decisive_crit = "CRITERION_1_DEADLINE_MET"
+                elif top_no_sc != no_sc:
+                    decisive_crit = "CRITERION_2_NO_SPENDING_CHANGES"
+                elif top_cand.total_amount_paid != c.total_amount_paid:
+                    decisive_crit = "CRITERION_3_TOTAL_AMOUNT_PAID"
+                elif top_cand.first_payment_date != c.first_payment_date:
+                    decisive_crit = "CRITERION_4_FIRST_PAYMENT_DATE"
+                elif top_cand.number_of_payments != c.number_of_payments:
+                    decisive_crit = "CRITERION_5_NUMBER_OF_PAYMENTS"
+                elif (
+                    top_cand.source_payment_option_id is not None
+                    and c.source_payment_option_id is not None
+                    and top_cand.source_payment_option_id != c.source_payment_option_id
+                ):
+                    decisive_crit = "CRITERION_6_PAYMENT_OPTION_ID"
+                elif top_cand.candidate_id != c.candidate_id:
+                    decisive_crit = "TECHNICAL_TIE_BREAKER_CANDIDATE_ID"
+
             competing_candidates.append(CompetingCandidateEvidence(
                 candidate_id=c.candidate_id,
                 rank=rank_idx,
                 payment_method=c.payment_method,
                 deadline_met=d_met,
-                spending_changes_required=len(c.spending_changes) > 0,
+                spending_changes_required=not no_sc,
                 total_amount_paid=c.total_amount_paid,
                 start_date=c.first_payment_date,
                 payment_count=c.number_of_payments,
                 payment_option_id=c.source_payment_option_id,
                 is_safe=c.is_safe,
-            ))
-        elif c_id == selected_c_id and selected_c is not None:
-            d_met = (
-                (selected_c.completion_date <= decision.explanation_evidence.desired_completion_date)
-                if selected_c.completion_date else False
-            )
-            competing_candidates.append(CompetingCandidateEvidence(
-                candidate_id=selected_c.candidate_id,
-                rank=rank_idx,
-                payment_method=selected_c.payment_method,
-                deadline_met=d_met,
-                spending_changes_required=len(selected_c.spending_changes) > 0,
-                total_amount_paid=selected_c.total_amount_paid,
-                start_date=selected_c.first_payment_date,
-                payment_count=selected_c.number_of_payments,
-                payment_option_id=selected_c.source_payment_option_id,
-                is_safe=selected_c.is_safe,
+                criterion_1_deadline_met=d_met,
+                criterion_2_no_spending_changes=no_sc,
+                criterion_3_total_amount_paid=c.total_amount_paid,
+                criterion_4_first_payment_date=c.first_payment_date,
+                criterion_5_number_of_payments=c.number_of_payments,
+                criterion_6_payment_option_id=c.source_payment_option_id,
+                decisive_criterion=decisive_crit,
+                is_winner=is_winner,
             ))
 
     # 3. Safety Checks & Reason Codes
@@ -656,9 +739,16 @@ def build_decision_certificate(
         ])
 
     if decision.ranking_trace is not None:
-        lineage_records.append(
-            EvidenceRef("ranking", "RankingCriteriaTrace", req_id, "ranking_criteria_trace")
-        )
+        lineage_records.extend([
+            EvidenceRef("ranking", "RankingCriteriaTrace", req_id, "ranking_criteria_trace"),
+            EvidenceRef("ranking", "RankingCriteriaTrace", req_id, "criterion_1_deadline_met"),
+            EvidenceRef("ranking", "RankingCriteriaTrace", req_id, "criterion_2_no_spending_changes"),
+            EvidenceRef("ranking", "RankingCriteriaTrace", req_id, "criterion_3_total_amount_paid"),
+            EvidenceRef("ranking", "RankingCriteriaTrace", req_id, "criterion_4_first_payment_date"),
+            EvidenceRef("ranking", "RankingCriteriaTrace", req_id, "criterion_5_number_of_payments"),
+            EvidenceRef("ranking", "RankingCriteriaTrace", req_id, "criterion_6_payment_option_id"),
+            EvidenceRef("ranking", "RankingCriteriaTrace", req_id, "technical_tie_breaker"),
+        ])
 
     if base_min_cash is not None:
         lineage_records.append(
@@ -909,6 +999,26 @@ def validate_certificate(
             )
         if certificate.ordered_candidate_ids != decision.ranked_candidate_ids:
             errors.append("ordered_candidate_ids does not match decision.ranked_candidate_ids")
+
+        # 11b. Cross-check all 6 ranking criteria when ranking trace is present
+        if decision.ranking_trace is not None:
+            if certificate.ranking_criteria_trace is None:
+                errors.append("ranking_criteria_trace missing in certificate when present in decision")
+            else:
+                rt = certificate.ranking_criteria_trace
+                d_rt = decision.ranking_trace
+                if rt.criterion_1_deadline_met != d_rt.criterion_1_deadline_met:
+                    errors.append("criterion_1_deadline_met mismatch")
+                if rt.criterion_2_no_spending_changes != d_rt.criterion_2_no_spending_changes:
+                    errors.append("criterion_2_no_spending_changes mismatch")
+                if rt.criterion_3_total_amount_paid != d_rt.criterion_3_total_amount_paid:
+                    errors.append("criterion_3_total_amount_paid mismatch")
+                if rt.criterion_4_first_payment_date != d_rt.criterion_4_first_payment_date:
+                    errors.append("criterion_4_first_payment_date mismatch")
+                if rt.criterion_5_number_of_payments != d_rt.criterion_5_number_of_payments:
+                    errors.append("criterion_5_number_of_payments mismatch")
+                if rt.criterion_6_payment_option_id != d_rt.criterion_6_payment_option_id:
+                    errors.append("criterion_6_payment_option_id mismatch")
 
     res = CertificateValidationResult(
         is_valid=(len(errors) == 0),
