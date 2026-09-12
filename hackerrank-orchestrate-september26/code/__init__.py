@@ -161,6 +161,12 @@ __all__ = [
     "deduplicate_and_summarize_upcoming_obligations",
     "SPENDING_TREND_THRESHOLD_PERCENT",
     "SPENDING_TREND_THRESHOLD_RATIO",
+    "AffordabilityStatus",
+    "status_rank",
+    "PaymentPlanFeasibility",
+    "AffordabilityCertificateReference",
+    "AffordabilityResult",
+    "classify_affordability",
 ]
 
 from .user_state import (
@@ -177,6 +183,16 @@ from .user_state import (
     SPENDING_TREND_THRESHOLD_PERCENT,
     SPENDING_TREND_THRESHOLD_RATIO,
 )
+
+from .affordability import (
+    AffordabilityStatus,
+    status_rank,
+    PaymentPlanFeasibility,
+    AffordabilityCertificateReference,
+    AffordabilityResult,
+    classify_affordability,
+)
+
 
 
 
