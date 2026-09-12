@@ -1,24 +1,24 @@
-"""Unit tests for recurrence detection and future-event expansion layer.
+"""Hardened unit test suite for recurrence detection and future-event expansion layer.
 
-Covers all 18 requirements specified in challenge prompt:
-1. single event does not create recurrence
-2. repeated monthly events create monthly recurrence
-3. repeated weekly events create weekly recurrence
-4. inconsistent intervals do not create false recurrence
-5. stable amounts are forecast correctly
-6. varying amounts use documented conservative rule
-7. recurring salary requires sufficient evidence
-8. pending credit does not create recurring income
-9. bonus/commission announcement does not create income
-10. recurring expense preserves category/flexibility
-11. protected expense is not reclassified as flexible
-12. explicit future event prevents duplicate forecast
-13. cancellation stops future recurrence
-14. amendment changes future recurrence only when explicitly supported
-15. generated event IDs are deterministic
-16. same input produces identical recurrence output
-17. date-range expansion respects start/end boundaries
-18. no unresolved event becomes a forecast cash event
+Covers all 18 specific requirements from Section 11:
+1. valid consecutive monthly recurrence
+2. skipped-month same-day false positive rejected
+3. month-end calendar recurrence
+4. irregular monthly rejected
+5. genuine explicit future duplicate suppressed
+6. unrelated same-category future event does not suppress
+7. pending event does not incorrectly suppress
+8. deterministic duplicate matching
+9. varying description handling
+10. unrelated message cannot cancel recurrence
+11. unrelated message cannot amend recurrence
+12. cancellation affects future only
+13. amendment affects future only
+14. no future events outside bounds
+15. no duplicate series/date occurrence
+16. unresolved event cannot establish recurrence
+17. pending credit cannot establish income
+18. speculative income cannot establish recurrence
 """
 
 import unittest
@@ -89,26 +89,15 @@ def _make_event(
     )
 
 
-class TestRecurrenceDetection(unittest.TestCase):
-    """Tests for recurrence detection and future expansion rules."""
+class TestHardenedRecurrence(unittest.TestCase):
+    """Hardened tests for recurrence detection and future expansion."""
 
-    def test_01_single_event_does_not_create_recurrence(self):
-        """A single occurrence must not create a recurring future event."""
-        e1 = _make_event("e1", effective_date=date(2025, 1, 15))
-        ledger = CanonicalLedger(events=[e1])
-        series_list, rejected = detect_recurrence_for_user(ledger, "u_test")
-
-        self.assertEqual(len(series_list), 0)
-        self.assertEqual(len(rejected), 1)
-        self.assertIn("insufficient_observations", rejected[0]["reason"])
-
-    def test_02_repeated_monthly_events_create_monthly_recurrence(self):
-        """Repeated monthly events create monthly recurrence."""
+    def test_01_valid_consecutive_monthly_recurrence(self):
+        """Jan 15, Feb 15, Mar 15 produces monthly recurrence."""
         events = [
-            _make_event("e1", effective_date=date(2025, 1, 10)),
-            _make_event("e2", effective_date=date(2025, 2, 10)),
-            _make_event("e3", effective_date=date(2025, 3, 10)),
-            _make_event("e4", effective_date=date(2025, 4, 10)),
+            _make_event("e1", effective_date=date(2025, 1, 15)),
+            _make_event("e2", effective_date=date(2025, 2, 15)),
+            _make_event("e3", effective_date=date(2025, 3, 15)),
         ]
         ledger = CanonicalLedger(events=events)
         series_list, _ = detect_recurrence_for_user(ledger, "u_test")
@@ -116,32 +105,15 @@ class TestRecurrenceDetection(unittest.TestCase):
         self.assertEqual(len(series_list), 1)
         s = series_list[0]
         self.assertEqual(s.frequency, RecurrenceFrequency.MONTHLY)
-        self.assertEqual(s.day_of_month, 10)
-        self.assertEqual(s.historical_count, 4)
+        self.assertEqual(s.day_of_month, 15)
+        self.assertEqual(s.historical_count, 3)
 
-    def test_03_repeated_weekly_events_create_weekly_recurrence(self):
-        """Repeated weekly events create weekly recurrence."""
+    def test_02_skipped_month_same_day_false_positive_rejected(self):
+        """Jan 15, Mar 15, May 15 must NOT become monthly recurrence."""
         events = [
-            _make_event("e1", effective_date=date(2025, 1, 7)),
-            _make_event("e2", effective_date=date(2025, 1, 14)),
-            _make_event("e3", effective_date=date(2025, 1, 21)),
-            _make_event("e4", effective_date=date(2025, 1, 28)),
-        ]
-        ledger = CanonicalLedger(events=events)
-        series_list, _ = detect_recurrence_for_user(ledger, "u_test")
-
-        self.assertEqual(len(series_list), 1)
-        s = series_list[0]
-        self.assertEqual(s.frequency, RecurrenceFrequency.WEEKLY)
-        self.assertEqual(s.interval_days, 7)
-
-    def test_04_inconsistent_intervals_do_not_create_false_recurrence(self):
-        """Inconsistent intervals do not create false recurrence."""
-        events = [
-            _make_event("e1", effective_date=date(2025, 1, 2)),
-            _make_event("e2", effective_date=date(2025, 1, 15)),
-            _make_event("e3", effective_date=date(2025, 3, 22)),
-            _make_event("e4", effective_date=date(2025, 4, 5)),
+            _make_event("e1", effective_date=date(2025, 1, 15)),
+            _make_event("e2", effective_date=date(2025, 3, 15)),
+            _make_event("e3", effective_date=date(2025, 5, 15)),
         ]
         ledger = CanonicalLedger(events=events)
         series_list, rejected = detect_recurrence_for_user(ledger, "u_test")
@@ -150,180 +122,174 @@ class TestRecurrenceDetection(unittest.TestCase):
         self.assertEqual(len(rejected), 1)
         self.assertEqual(rejected[0]["reason"], "irregular_intervals")
 
-    def test_05_stable_amounts_are_forecast_correctly(self):
-        """Stable amounts are forecast with exact stable amount."""
+    def test_03_month_end_calendar_recurrence(self):
+        """Jan 31, Feb 28, Mar 31 produces valid monthly recurrence."""
         events = [
-            _make_event("e1", effective_date=date(2025, 1, 15), amount_home=Decimal("250.00")),
-            _make_event("e2", effective_date=date(2025, 2, 15), amount_home=Decimal("250.00")),
-            _make_event("e3", effective_date=date(2025, 3, 15), amount_home=Decimal("250.00")),
+            _make_event("e1", effective_date=date(2025, 1, 31)),
+            _make_event("e2", effective_date=date(2025, 2, 28)),
+            _make_event("e3", effective_date=date(2025, 3, 31)),
         ]
         ledger = CanonicalLedger(events=events)
         series_list, _ = detect_recurrence_for_user(ledger, "u_test")
 
         self.assertEqual(len(series_list), 1)
-        self.assertEqual(series_list[0].forecast_amount, Decimal("250.00"))
-        self.assertEqual(series_list[0].amount_rule, AmountForecastingRule.EXACT_STABLE.value)
+        self.assertEqual(series_list[0].frequency, RecurrenceFrequency.MONTHLY)
+        self.assertEqual(series_list[0].day_of_month, 31)
 
-    def test_06_varying_amounts_use_conservative_rule(self):
-        """Varying amounts use upper median for expenses, lower median for income."""
-        # Expense varying
-        exp_events = [
-            _make_event("e1", effective_date=date(2025, 1, 15), amount_home=Decimal("100.00")),
-            _make_event("e2", effective_date=date(2025, 2, 15), amount_home=Decimal("150.00")),
-            _make_event("e3", effective_date=date(2025, 3, 15), amount_home=Decimal("120.00")),
-            _make_event("e4", effective_date=date(2025, 4, 15), amount_home=Decimal("180.00")),
+    def test_04_irregular_monthly_rejected(self):
+        """Jan 30, Feb 28, Apr 30 (skipped March) must be rejected."""
+        events = [
+            _make_event("e1", effective_date=date(2025, 1, 30)),
+            _make_event("e2", effective_date=date(2025, 2, 28)),
+            _make_event("e3", effective_date=date(2025, 4, 30)),
         ]
-        ledger = CanonicalLedger(events=exp_events)
+        ledger = CanonicalLedger(events=events)
+        series_list, rejected = detect_recurrence_for_user(ledger, "u_test")
+
+        self.assertEqual(len(series_list), 0)
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0]["reason"], "irregular_intervals")
+
+    def test_05_genuine_explicit_future_duplicate_suppressed(self):
+        """Genuine explicit scheduled future event suppresses duplicate forecast."""
+        events = [
+            _make_event("s1", direction=Direction.INFLOW, effective_date=date(2025, 1, 15), amount_home=Decimal("50000"), category="salary", description="Payroll credit"),
+            _make_event("s2", direction=Direction.INFLOW, effective_date=date(2025, 2, 15), amount_home=Decimal("50000"), category="salary", description="Payroll credit"),
+            _make_event("s3", direction=Direction.INFLOW, effective_date=date(2025, 3, 15), amount_home=Decimal("50000"), category="salary", description="Payroll credit"),
+            # Scheduled next confirmed salary in April
+            _make_event("s_future", direction=Direction.INFLOW, effective_date=date(2025, 4, 15), amount_home=Decimal("50000"), status="scheduled", category="salary", description="Next confirmed salary"),
+        ]
+        ledger = CanonicalLedger(events=events)
         series_list, _ = detect_recurrence_for_user(ledger, "u_test")
-        # Sorted amounts: 100, 120, 150, 180 -> upper median (index 2) is 150
-        self.assertEqual(series_list[0].forecast_amount, Decimal("150.00"))
-        self.assertEqual(series_list[0].amount_rule, AmountForecastingRule.CONSERVATIVE_UPPER_MEDIAN_EXPENSE.value)
+        self.assertEqual(len(series_list), 1)
 
-        # Income varying
-        inc_events = [
-            _make_event("i1", direction=Direction.INFLOW, effective_date=date(2025, 1, 15), amount_home=Decimal("1000.00"), category="salary", description="Payroll"),
-            _make_event("i2", direction=Direction.INFLOW, effective_date=date(2025, 2, 15), amount_home=Decimal("1500.00"), category="salary", description="Payroll"),
-            _make_event("i3", direction=Direction.INFLOW, effective_date=date(2025, 3, 15), amount_home=Decimal("1200.00"), category="salary", description="Payroll"),
-            _make_event("i4", direction=Direction.INFLOW, effective_date=date(2025, 4, 15), amount_home=Decimal("1800.00"), category="salary", description="Payroll"),
-        ]
-        ledger_inc = CanonicalLedger(events=inc_events)
-        series_inc, _ = detect_recurrence_for_user(ledger_inc, "u_test")
-        # Sorted amounts: 1000, 1200, 1500, 1800 -> lower median (index 1) is 1200
-        self.assertEqual(series_inc[0].forecast_amount, Decimal("1200.00"))
-        self.assertEqual(series_inc[0].amount_rule, AmountForecastingRule.CONSERVATIVE_LOWER_MEDIAN_INCOME.value)
+        res = expand_future_events(series_list, start_date=date(2025, 4, 1), end_date=date(2025, 5, 31), ledger=ledger)
+        # April 15 forecast suppressed
+        self.assertEqual(len(res.suppressed_forecasts), 1)
+        self.assertEqual(res.suppressed_forecasts[0].conflicting_event_id, "s_future")
+        # May 15 forecast emitted
+        self.assertEqual(len(res.future_events), 1)
+        self.assertEqual(res.future_events[0].effective_date, date(2025, 5, 15))
 
-    def test_07_recurring_salary_requires_sufficient_evidence(self):
-        """A recurring salary must have at least 3 historical observations."""
+    def test_06_unrelated_same_category_future_event_does_not_suppress(self):
+        """Unrelated explicit event in same category must NOT suppress recurring forecast."""
         events = [
-            _make_event("s1", direction=Direction.INFLOW, effective_date=date(2025, 1, 15), category="salary", description="Base Salary"),
-            _make_event("s2", direction=Direction.INFLOW, effective_date=date(2025, 2, 15), category="salary", description="Base Salary"),
+            _make_event("e1", effective_date=date(2025, 1, 10), amount_home=Decimal("999"), category="entertainment", description="Netflix subscription"),
+            _make_event("e2", effective_date=date(2025, 2, 10), amount_home=Decimal("999"), category="entertainment", description="Netflix subscription"),
+            _make_event("e3", effective_date=date(2025, 3, 10), amount_home=Decimal("999"), category="entertainment", description="Netflix subscription"),
+            # Unrelated event in same category
+            _make_event("e_dinner", effective_date=date(2025, 4, 10), amount_home=Decimal("2500"), status="scheduled", category="entertainment", description="Restaurant dinner"),
         ]
         ledger = CanonicalLedger(events=events)
-        series_list, rejected = detect_recurrence_for_user(ledger, "u_test")
-        self.assertEqual(len(series_list), 0)
-        self.assertEqual(rejected[0]["reason"], "insufficient_observations (< 3)")
+        series_list, _ = detect_recurrence_for_user(ledger, "u_test")
+        self.assertEqual(len(series_list), 1)
 
-    def test_08_pending_credit_does_not_create_recurring_income(self):
-        """Pending credits are non-cash and do not create recurring income."""
+        res = expand_future_events(series_list, start_date=date(2025, 4, 1), end_date=date(2025, 4, 30), ledger=ledger)
+        # Netflix forecast must NOT be suppressed by Restaurant dinner
+        self.assertEqual(len(res.suppressed_forecasts), 0)
+        self.assertEqual(len(res.future_events), 1)
+        self.assertEqual(res.future_events[0].effective_date, date(2025, 4, 10))
+        self.assertIn("Netflix subscription", res.future_events[0].description)
+
+    def test_07_pending_event_does_not_incorrectly_suppress(self):
+        """Generic pending card charge must NOT suppress a recurring forecast."""
         events = [
-            _make_event("s1", direction=Direction.INFLOW, effective_date=date(2025, 1, 15), category="salary", description="Base Salary"),
-            _make_event("s2", direction=Direction.INFLOW, effective_date=date(2025, 2, 15), category="salary", description="Base Salary"),
-            _make_event(
-                "s3",
-                direction=Direction.INFLOW,
-                effective_date=date(2025, 3, 15),
-                category="salary",
-                description="Base Salary",
-                status="pending",
-                is_cash=False,
-                cash_impact=CashImpactType.PENDING_CREDIT_IGNORED,
-            ),
+            _make_event("h1", effective_date=date(2025, 1, 11), amount_home=Decimal("4500"), category="healthcare", description="Therapy appointment"),
+            _make_event("h2", effective_date=date(2025, 2, 11), amount_home=Decimal("4500"), category="healthcare", description="Therapy appointment"),
+            _make_event("h3", effective_date=date(2025, 3, 11), amount_home=Decimal("4500"), category="healthcare", description="Therapy appointment"),
+            # Pending pharmacy card charge on April 11
+            _make_event("h_pend", effective_date=date(2025, 4, 11), amount_home=Decimal("2800"), status="pending", is_cash=True, cash_impact=CashImpactType.PENDING_DEBIT_RESERVED, category="healthcare", description="Pending pharmacy card charge"),
         ]
         ledger = CanonicalLedger(events=events)
-        # s3 is non-cash, so only s1 and s2 are usable cash events (< 3)
-        series_list, rejected = detect_recurrence_for_user(ledger, "u_test")
-        self.assertEqual(len(series_list), 0)
+        series_list, _ = detect_recurrence_for_user(ledger, "u_test")
+        self.assertEqual(len(series_list), 1)
 
-    def test_09_bonus_announcement_does_not_create_income(self):
-        """Bonus or unconfirmed messages do not invent recurring income."""
+        res = expand_future_events(series_list, start_date=date(2025, 4, 1), end_date=date(2025, 4, 30), ledger=ledger)
+        # Must not be suppressed by generic pending debit
+        self.assertEqual(len(res.suppressed_forecasts), 0)
+        self.assertEqual(len(res.future_events), 1)
+        self.assertEqual(res.future_events[0].effective_date, date(2025, 4, 11))
+
+    def test_08_deterministic_duplicate_matching(self):
+        """Repeated expansion produces identical suppression results."""
         events = [
-            _make_event("e1", effective_date=date(2025, 1, 10)),
-            _make_event("e2", effective_date=date(2025, 2, 10)),
-            _make_event("e3", effective_date=date(2025, 3, 10)),
+            _make_event("e1", effective_date=date(2025, 1, 15), category="rent", description="Rent"),
+            _make_event("e2", effective_date=date(2025, 2, 15), category="rent", description="Rent"),
+            _make_event("e3", effective_date=date(2025, 3, 15), category="rent", description="Rent"),
+            _make_event("e_sch", effective_date=date(2025, 4, 15), status="scheduled", category="rent", description="Scheduled rent payment"),
+        ]
+        ledger = CanonicalLedger(events=events)
+        series_list, _ = detect_recurrence_for_user(ledger, "u_test")
+
+        res1 = expand_future_events(series_list, date(2025, 4, 1), date(2025, 5, 31), ledger=ledger)
+        res2 = expand_future_events(series_list, date(2025, 4, 1), date(2025, 5, 31), ledger=ledger)
+
+        self.assertEqual([sf.conflicting_event_id for sf in res1.suppressed_forecasts], [sf.conflicting_event_id for sf in res2.suppressed_forecasts])
+        self.assertEqual([f.event_id for f in res1.future_events], [f.event_id for f in res2.future_events])
+
+    def test_09_varying_description_handling(self):
+        """Reducible dining with varying descriptions is unified by category/flexibility/min_amount."""
+        events = [
+            _make_event("d1", effective_date=date(2025, 1, 7), category="dining", description="Coffee shop", flexibility="reducible", minimum_allowed_amount_home=Decimal("500")),
+            _make_event("d2", effective_date=date(2025, 1, 28), category="dining", description="Weekend food delivery", flexibility="reducible", minimum_allowed_amount_home=Decimal("500")),
+            _make_event("d3", effective_date=date(2025, 2, 18), category="dining", description="Bakery and snacks", flexibility="reducible", minimum_allowed_amount_home=Decimal("500")),
+        ]
+        ledger = CanonicalLedger(events=events)
+        series_list, _ = detect_recurrence_for_user(ledger, "u_test")
+
+        self.assertEqual(len(series_list), 1)
+        self.assertEqual(series_list[0].frequency, RecurrenceFrequency.TRIWEEKLY)
+        self.assertEqual(series_list[0].flexibility, "reducible")
+        self.assertEqual(series_list[0].minimum_allowed_amount, Decimal("500"))
+
+    def test_10_unrelated_message_cannot_cancel_recurrence(self):
+        """Message about salary termination cannot cancel a rent series."""
+        events = [
+            _make_event("r1", effective_date=date(2025, 1, 5), category="rent", description="Rent"),
+            _make_event("r2", effective_date=date(2025, 2, 5), category="rent", description="Rent"),
+            _make_event("r3", effective_date=date(2025, 3, 5), category="rent", description="Rent"),
         ]
         msg = Message(
             message_id="m1",
             user_id="u_test",
             request_id=None,
             related_event_id=None,
-            sent_at=datetime(2025, 3, 1, tzinfo=timezone.utc),
+            sent_at=datetime(2025, 3, 20, tzinfo=timezone.utc),
             source_type="employer",
-            message_text="Your quarterly bonus is under review and pending approval.",
+            message_text="The current seasonal contract has ended. No off-season income confirmed.",
         )
         ledger = CanonicalLedger(events=events)
         series_list, _ = detect_recurrence_for_user(ledger, "u_test", messages=[msg])
-        # No bonus income series created
-        income_series = [s for s in series_list if s.direction == Direction.INFLOW]
-        self.assertEqual(len(income_series), 0)
 
-    def test_10_recurring_expense_preserves_category_and_flexibility(self):
-        """Recurring expense retains category, flexibility, and minimum_allowed_amount."""
-        events = [
-            _make_event("e1", effective_date=date(2025, 1, 10), category="streaming", flexibility="stoppable", minimum_allowed_amount_home=None),
-            _make_event("e2", effective_date=date(2025, 2, 10), category="streaming", flexibility="stoppable", minimum_allowed_amount_home=None),
-            _make_event("e3", effective_date=date(2025, 3, 10), category="streaming", flexibility="stoppable", minimum_allowed_amount_home=None),
-        ]
-        ledger = CanonicalLedger(events=events)
-        series_list, _ = detect_recurrence_for_user(ledger, "u_test")
         self.assertEqual(len(series_list), 1)
-        s = series_list[0]
-        self.assertEqual(s.category, "streaming")
-        self.assertEqual(s.flexibility, "stoppable")
-        self.assertIsNone(s.minimum_allowed_amount)
+        self.assertFalse(series_list[0].is_cancelled)
 
-        # Expand future events
-        res = expand_future_events(series_list, start_date=date(2025, 4, 1), end_date=date(2025, 6, 30))
-        for f_evt in res.future_events:
-            self.assertEqual(f_evt.category, "streaming")
-            self.assertEqual(f_evt.flexibility, "stoppable")
-
-    def test_11_protected_expense_is_not_reclassified_as_flexible(self):
-        """Protected category in profile marks the series as protected."""
+    def test_11_unrelated_message_cannot_amend_recurrence(self):
+        """Message about rent increase cannot amend salary."""
         events = [
-            _make_event("e1", effective_date=date(2025, 1, 10), category="utilities", flexibility="fixed"),
-            _make_event("e2", effective_date=date(2025, 2, 10), category="utilities", flexibility="fixed"),
-            _make_event("e3", effective_date=date(2025, 3, 10), category="utilities", flexibility="fixed"),
+            _make_event("s1", direction=Direction.INFLOW, effective_date=date(2025, 1, 15), amount_home=Decimal("5000"), category="salary", description="Salary"),
+            _make_event("s2", direction=Direction.INFLOW, effective_date=date(2025, 2, 15), amount_home=Decimal("5000"), category="salary", description="Salary"),
+            _make_event("s3", direction=Direction.INFLOW, effective_date=date(2025, 3, 15), amount_home=Decimal("5000"), category="salary", description="Salary"),
         ]
-        prof = FinancialProfile(
+        msg = Message(
+            message_id="m_rent",
             user_id="u_test",
-            home_currency="INR",
-            current_available_balance=Decimal("10000"),
-            minimum_balance_to_keep=Decimal("2000"),
-            financial_priorities=("emergency_fund",),
-            expense_categories_to_protect=("utilities", "rent"),
-            expense_categories_user_is_willing_to_reduce=(),
-            expense_categories_user_is_willing_to_stop=(),
-            payment_methods_user_will_consider=("full_payment",),
-            max_installment_months=3,
+            request_id=None,
+            related_event_id=None,
+            sent_at=datetime(2025, 3, 20, tzinfo=timezone.utc),
+            source_type="service_provider",
+            message_text="StayLedger notice: The renewed lease increases monthly rent by 12%.",
         )
         ledger = CanonicalLedger(events=events)
-        series_list, _ = detect_recurrence_for_user(ledger, "u_test", profile=prof)
+        series_list, _ = detect_recurrence_for_user(ledger, "u_test", messages=[msg])
+
         self.assertEqual(len(series_list), 1)
-        self.assertTrue(series_list[0].is_protected)
-        self.assertEqual(series_list[0].flexibility, "fixed")
+        self.assertEqual(series_list[0].forecast_amount, Decimal("5000"))
+        self.assertIsNone(series_list[0].amendment_reason)
 
-    def test_12_explicit_future_event_prevents_duplicate_forecast(self):
-        """Explicit scheduled canonical event suppresses duplicate forecast."""
-        events = [
-            _make_event("e1", effective_date=date(2025, 1, 15), category="rent", description="Rent"),
-            _make_event("e2", effective_date=date(2025, 2, 15), category="rent", description="Rent"),
-            _make_event("e3", effective_date=date(2025, 3, 15), category="rent", description="Rent"),
-            # Explicit future scheduled rent in April
-            _make_event("e_future", effective_date=date(2025, 4, 15), status="scheduled", category="rent", description="Scheduled Rent"),
-        ]
-        ledger = CanonicalLedger(events=events)
-        series_list, _ = detect_recurrence_for_user(ledger, "u_test")
-        self.assertEqual(len(series_list), 1)
-
-        # Expand for April and May
-        res = expand_future_events(
-            series_list,
-            start_date=date(2025, 4, 1),
-            end_date=date(2025, 5, 31),
-            ledger=ledger,
-        )
-        # April 15 forecast should be suppressed due to e_future
-        self.assertEqual(len(res.suppressed_forecasts), 1)
-        self.assertEqual(res.suppressed_forecasts[0].conflicting_event_id, "e_future")
-        self.assertEqual(res.suppressed_forecasts[0].forecast_date, date(2025, 4, 15))
-
-        # Only May 15 should be in future_events
-        self.assertEqual(len(res.future_events), 1)
-        self.assertEqual(res.future_events[0].effective_date, date(2025, 5, 15))
-
-    def test_13_cancellation_stops_future_recurrence(self):
-        """Explicit cancellation in message terminates recurrence."""
-        events = [
+    def test_12_cancellation_affects_future_only(self):
+        """Cancellation terminates future expansion without altering past canonical events."""
+        past_events = [
             _make_event("s1", direction=Direction.INFLOW, effective_date=date(2025, 1, 15), category="salary", description="Salary"),
             _make_event("s2", direction=Direction.INFLOW, effective_date=date(2025, 2, 15), category="salary", description="Salary"),
             _make_event("s3", direction=Direction.INFLOW, effective_date=date(2025, 3, 15), category="salary", description="Salary"),
@@ -337,40 +303,47 @@ class TestRecurrenceDetection(unittest.TestCase):
             source_type="employer",
             message_text="The current seasonal contract has ended. No off-season income confirmed.",
         )
-        ledger = CanonicalLedger(events=events)
+        ledger = CanonicalLedger(events=past_events)
         series_list, _ = detect_recurrence_for_user(ledger, "u_test", messages=[msg])
-        self.assertEqual(len(series_list), 1)
-        self.assertTrue(series_list[0].is_cancelled)
-        self.assertIn("contract_ended", series_list[0].cancellation_reason)
 
-        # Expanding events should yield zero future events
-        res = expand_future_events(series_list, start_date=date(2025, 4, 1), end_date=date(2025, 6, 30))
+        self.assertTrue(series_list[0].is_cancelled)
+        # Past events remain settled cash in ledger
+        self.assertEqual(len(ledger.get_cash_events()), 3)
+        self.assertEqual(ledger.events[0].amount_home, Decimal("100.00"))
+
+        # Future expansion yields zero future events
+        res = expand_future_events(series_list, date(2025, 4, 1), date(2025, 6, 30))
         self.assertEqual(len(res.future_events), 0)
 
-    def test_14_amendment_changes_future_recurrence_when_supported(self):
-        """Employer message amending salary modifies forecast amount."""
-        events = [
+    def test_13_amendment_affects_future_only(self):
+        """Employer raise modifies future forecast amount while past events retain historical amounts."""
+        past_events = [
             _make_event("s1", direction=Direction.INFLOW, effective_date=date(2025, 1, 15), amount_home=Decimal("1000.00"), category="salary", description="Salary"),
             _make_event("s2", direction=Direction.INFLOW, effective_date=date(2025, 2, 15), amount_home=Decimal("1000.00"), category="salary", description="Salary"),
             _make_event("s3", direction=Direction.INFLOW, effective_date=date(2025, 3, 15), amount_home=Decimal("1000.00"), category="salary", description="Salary"),
         ]
         msg = Message(
-            message_id="m_raise",
+            message_id="m_up",
             user_id="u_test",
             request_id=None,
             related_event_id=None,
             sent_at=datetime(2025, 3, 20, tzinfo=timezone.utc),
             source_type="employer",
-            message_text="Your monthly salary has increased to INR 1250.00 starting next cycle.",
+            message_text="Your monthly salary has increased to INR 1500.00 starting next cycle.",
         )
-        ledger = CanonicalLedger(events=events)
+        ledger = CanonicalLedger(events=past_events)
         series_list, _ = detect_recurrence_for_user(ledger, "u_test", messages=[msg])
-        self.assertEqual(len(series_list), 1)
-        self.assertEqual(series_list[0].forecast_amount, Decimal("1250.00"))
-        self.assertEqual(series_list[0].amount_rule, AmountForecastingRule.EXPLICIT_AMENDMENT.value)
 
-    def test_15_generated_event_ids_are_deterministic(self):
-        """Future event IDs are deterministic based on series and date."""
+        self.assertEqual(series_list[0].forecast_amount, Decimal("1500.00"))
+        # Historical events in ledger remain 1000.00
+        for e in ledger.events:
+            self.assertEqual(e.amount_home, Decimal("1000.00"))
+
+        res = expand_future_events(series_list, date(2025, 4, 1), date(2025, 4, 30))
+        self.assertEqual(res.future_events[0].amount_home, Decimal("1500.00"))
+
+    def test_14_no_future_events_outside_bounds(self):
+        """Future expansion generates occurrences strictly within [start_date, end_date]."""
         events = [
             _make_event("e1", effective_date=date(2025, 1, 10)),
             _make_event("e2", effective_date=date(2025, 2, 10)),
@@ -378,41 +351,28 @@ class TestRecurrenceDetection(unittest.TestCase):
         ]
         ledger = CanonicalLedger(events=events)
         series_list, _ = detect_recurrence_for_user(ledger, "u_test")
-        res1 = expand_future_events(series_list, start_date=date(2025, 4, 1), end_date=date(2025, 5, 31))
-        res2 = expand_future_events(series_list, start_date=date(2025, 4, 1), end_date=date(2025, 5, 31))
 
-        self.assertEqual([e.event_id for e in res1.future_events], [e.event_id for e in res2.future_events])
-        self.assertEqual(res1.future_events[0].event_id, "forecast_rec_u_test_utilities_e3_20250410")
-
-    def test_16_same_input_produces_identical_output(self):
-        """Running detection twice produces identical series."""
-        events = [
-            _make_event("e1", effective_date=date(2025, 1, 10)),
-            _make_event("e2", effective_date=date(2025, 2, 10)),
-            _make_event("e3", effective_date=date(2025, 3, 10)),
-        ]
-        ledger = CanonicalLedger(events=events)
-        s1, _ = detect_recurrence_for_user(ledger, "u_test")
-        s2, _ = detect_recurrence_for_user(ledger, "u_test")
-        self.assertEqual(s1, s2)
-
-    def test_17_date_range_expansion_respects_boundaries(self):
-        """Future expansion generates dates strictly within [start_date, end_date]."""
-        events = [
-            _make_event("e1", effective_date=date(2025, 1, 15)),
-            _make_event("e2", effective_date=date(2025, 2, 15)),
-            _make_event("e3", effective_date=date(2025, 3, 15)),
-        ]
-        ledger = CanonicalLedger(events=events)
-        series_list, _ = detect_recurrence_for_user(ledger, "u_test")
-
-        # Range only covers May
-        res = expand_future_events(series_list, start_date=date(2025, 5, 1), end_date=date(2025, 5, 31))
+        # Range strictly inside April 1..April 30
+        res = expand_future_events(series_list, start_date=date(2025, 4, 1), end_date=date(2025, 4, 30))
         self.assertEqual(len(res.future_events), 1)
-        self.assertEqual(res.future_events[0].effective_date, date(2025, 5, 15))
+        self.assertEqual(res.future_events[0].effective_date, date(2025, 4, 10))
 
-    def test_18_no_unresolved_event_becomes_forecast_cash_event(self):
-        """Unresolved events cannot form or contribute to recurring cash forecasts."""
+    def test_15_no_duplicate_series_date_occurrence(self):
+        """A series generates at most one forecast per scheduled occurrence date."""
+        events = [
+            _make_event("e1", effective_date=date(2025, 1, 10)),
+            _make_event("e2", effective_date=date(2025, 2, 10)),
+            _make_event("e3", effective_date=date(2025, 3, 10)),
+        ]
+        ledger = CanonicalLedger(events=events)
+        series_list, _ = detect_recurrence_for_user(ledger, "u_test")
+
+        res = expand_future_events(series_list, start_date=date(2025, 4, 1), end_date=date(2025, 6, 30))
+        dates = [f.effective_date for f in res.future_events]
+        self.assertEqual(len(dates), len(set(dates)))
+
+    def test_16_unresolved_event_cannot_establish_recurrence(self):
+        """Unresolved events cannot form or contribute to recurring forecasts."""
         unresolved_events = [
             _make_event("u1", effective_date=date(2025, 1, 10), is_unresolved=True),
             _make_event("u2", effective_date=date(2025, 2, 10), is_unresolved=True),
@@ -421,6 +381,39 @@ class TestRecurrenceDetection(unittest.TestCase):
         ledger = CanonicalLedger(events=unresolved_events)
         series_list, _ = detect_recurrence_for_user(ledger, "u_test")
         self.assertEqual(len(series_list), 0)
+
+    def test_17_pending_credit_cannot_establish_income(self):
+        """Pending credits are non-cash and cannot establish recurring salary."""
+        events = [
+            _make_event("s1", direction=Direction.INFLOW, effective_date=date(2025, 1, 15), category="salary", description="Salary"),
+            _make_event("s2", direction=Direction.INFLOW, effective_date=date(2025, 2, 15), category="salary", description="Salary"),
+            _make_event("s3", direction=Direction.INFLOW, effective_date=date(2025, 3, 15), status="pending", is_cash=False, cash_impact=CashImpactType.PENDING_CREDIT_IGNORED, category="salary", description="Salary"),
+        ]
+        ledger = CanonicalLedger(events=events)
+        series_list, rejected = detect_recurrence_for_user(ledger, "u_test")
+        self.assertEqual(len(series_list), 0)
+        self.assertEqual(rejected[0]["reason"], "insufficient_observations (< 3)")
+
+    def test_18_speculative_income_cannot_establish_recurrence(self):
+        """Unconfirmed bonus / prize messages do not invent recurring income."""
+        events = [
+            _make_event("e1", effective_date=date(2025, 1, 10)),
+            _make_event("e2", effective_date=date(2025, 2, 10)),
+            _make_event("e3", effective_date=date(2025, 3, 10)),
+        ]
+        msg = Message(
+            message_id="m_prize",
+            user_id="u_test",
+            request_id=None,
+            related_event_id=None,
+            sent_at=datetime(2025, 3, 1, tzinfo=timezone.utc),
+            source_type="financial_service",
+            message_text="Your prize claim is verified and pending payment processing. Not credited yet.",
+        )
+        ledger = CanonicalLedger(events=events)
+        series_list, _ = detect_recurrence_for_user(ledger, "u_test", messages=[msg])
+        income_series = [s for s in series_list if s.direction == Direction.INFLOW]
+        self.assertEqual(len(income_series), 0)
 
 
 if __name__ == "__main__":

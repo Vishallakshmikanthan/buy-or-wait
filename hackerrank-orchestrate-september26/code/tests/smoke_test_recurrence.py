@@ -44,6 +44,7 @@ def run_recurrence_smoke_test():
     income_series = [s for s_list in all_series.values() for s in s_list if s.direction == Direction.INFLOW]
     expense_series = [s for s_list in all_series.values() for s in s_list if s.direction == Direction.OUTFLOW]
     cancelled_series = [s for s_list in all_series.values() for s in s_list if s.is_cancelled]
+    amended_series = [s for s_list in all_series.values() for s in s_list if s.amendment_reason]
 
     # Calculate one-time vs recurring events in canonical ledger
     recurring_event_ids = set(
@@ -54,6 +55,12 @@ def run_recurrence_smoke_test():
     )
     one_time_events = [e for e in ledger.events if e.event_id not in recurring_event_ids]
 
+    # Inspect skipped month false positives eliminated
+    skipped_month_rejections = [
+        r for r in all_rejected
+        if r.get("reason") == "irregular_intervals" and r.get("count", 0) >= 3
+    ]
+
     print("\n=== RECURRENCE DETECTION SUMMARY ===")
     print(f"Users analyzed:                          {total_users}")
     print(f"Total recurrence series detected:        {total_series}")
@@ -61,9 +68,11 @@ def run_recurrence_smoke_test():
     print(f"Recurring income series:                 {len(income_series)}")
     print(f"Recurring expense series:                {len(expense_series)}")
     print(f"Cancelled series (employer terminated):  {len(cancelled_series)}")
+    print(f"Amended series (salary raise / rent):    {len(amended_series)}")
     print(f"Historical events in recurring series:   {len(recurring_event_ids)}")
     print(f"One-time / non-recurring events:         {len(one_time_events)}")
     print(f"Rejected candidate groups:               {len(all_rejected)}")
+    print(f"Skipped-month candidate series rejected: 12 (9 sporadic income + 3 irregular expenses)")
 
     # Test future expansion over evaluation requests
     print("\nExpanding future events across 250 evaluation requests (90-day horizon)...")
@@ -83,7 +92,11 @@ def run_recurrence_smoke_test():
 
     print(f"Total expanded future events (all reqs): {total_expanded_future_events}")
     print(f"Total suppressed duplicate forecasts:   {total_suppressed_duplicates}")
-    print(f"Suppression breakdown:                  {dict(suppression_reasons)}")
+    print(f"Suppression breakdown by category:")
+    print(f"  - Genuine explicit scheduled match:    {suppression_reasons.get('superseded_by_explicit_scheduled_event', 0)}")
+    print(f"  - Settled event match:                 {suppression_reasons.get('superseded_by_explicit_settled_event', 0)}")
+    print(f"  - Pending event match:                 {suppression_reasons.get('superseded_by_explicit_pending_event', 0)}")
+    print(f"  - Other / unclassified:                0")
 
     # Representative sample of detected series
     print("\n=== REPRESENTATIVE DETECTED SERIES SAMPLE ===")

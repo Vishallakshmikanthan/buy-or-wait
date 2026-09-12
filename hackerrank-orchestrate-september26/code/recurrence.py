@@ -149,6 +149,43 @@ def _calculate_forecast_amount(
     return median_val, rule
 
 
+def _is_consecutive_monthly(sorted_dates: List[date]) -> Tuple[bool, Optional[int]]:
+    """Verify that dates advance month by month in strictly consecutive calendar months.
+
+    Rules:
+    - Successive observations must advance by exactly 1 calendar month.
+    - Tolerate legitimate month-end clamping (e.g. Jan 31 -> Feb 28/29 -> Mar 31).
+    - Tolerate at most +/- 2 days for weekend/banking holiday shifts.
+    - Reject skipped months (e.g. Jan 15, Mar 15, May 15).
+    """
+    if len(sorted_dates) < 3:
+        return False, None
+
+    # 1. Strictly consecutive calendar months
+    for i in range(len(sorted_dates) - 1):
+        d1, d2 = sorted_dates[i], sorted_dates[i + 1]
+        m_diff = (d2.year * 12 + d2.month) - (d1.year * 12 + d1.month)
+        if m_diff != 1:
+            return False, None
+
+    # 2. Day of month consistency and month-end clamping
+    days = [d.day for d in sorted_dates]
+    base_day = max(days)  # e.g., 31 for month-end clamped to 28/29/30
+
+    for d in sorted_dates:
+        dim = calendar.monthrange(d.year, d.month)[1]
+        expected_day = min(base_day, dim)
+        if abs(d.day - expected_day) > 2:
+            return False, None
+
+    # 3. Overall day differences must fall within legitimate month boundaries [27, 33]
+    diffs = [(sorted_dates[i + 1] - sorted_dates[i]).days for i in range(len(sorted_dates) - 1)]
+    if not all(27 <= diff <= 33 for diff in diffs):
+        return False, None
+
+    return True, base_day
+
+
 def _detect_frequency(sorted_dates: List[date]) -> Tuple[Optional[RecurrenceFrequency], Optional[int], Optional[int]]:
     """Determine recurrence frequency and parameters from sorted event dates.
 
@@ -172,11 +209,9 @@ def _detect_frequency(sorted_dates: List[date]) -> Tuple[Optional[RecurrenceFreq
     if all(20 <= d <= 22 for d in diffs):
         return RecurrenceFrequency.TRIWEEKLY, 21, None
 
-    # Monthly: either all diffs in [27, 32] or invariant day_of_month
-    days = [d.day for d in sorted_dates]
-    if all(27 <= d <= 32 for d in diffs) or len(set(days)) == 1:
-        # Day of month is the mode or latest
-        day_of_month = days[-1]
+    # Monthly: strictly consecutive calendar months with calendar-aware progression
+    is_monthly, day_of_month = _is_consecutive_monthly(sorted_dates)
+    if is_monthly:
         return RecurrenceFrequency.MONTHLY, None, day_of_month
 
     return None, None, None
@@ -432,6 +467,51 @@ def _generate_candidate_dates(
     return dates
 
 
+def _is_genuine_duplicate(
+    series: RecurrenceSeries,
+    candidate_date: date,
+    explicit_event: CanonicalEvent,
+) -> bool:
+    """Determine whether an explicit canonical event represents the same obligation.
+
+    Safety Rules:
+    1. Must match user_id and direction.
+    2. Event status MUST be 'scheduled' (not generic pending or past settled).
+    3. Date must be close (|explicit.effective_date - candidate_date| <= 3).
+    4. Category must match.
+    5. Semantic obligation compatibility:
+       - Salary: explicit event description must relate to salary/payroll (e.g. 'Next confirmed salary').
+       - Expenses: explicit event must be a scheduled obligation (e.g. starts with 'Scheduled', 'bill payment retry')
+         or share matching description. Unrelated transactions in the same category must NOT suppress recurring series.
+       - Amount compatibility: if amounts exist, must be reasonably compatible (within 35% variance).
+    """
+    if explicit_event.user_id != series.user_id:
+        return False
+    if explicit_event.direction != series.direction:
+        return False
+    if explicit_event.status != "scheduled":
+        return False
+    if abs((explicit_event.effective_date - candidate_date).days) > 3:
+        return False
+    if explicit_event.category != series.category:
+        return False
+
+    exp_desc = explicit_event.description.lower()
+    ser_desc = series.description.lower()
+
+    if series.category == "salary":
+        return "salary" in exp_desc or "payroll" in exp_desc
+
+    # For expenses: must denote scheduled obligation or share description keywords
+    if "scheduled" in exp_desc or "bill payment" in exp_desc or ser_desc in exp_desc or exp_desc in ser_desc:
+        if explicit_event.amount_home and series.forecast_amount > Decimal("0"):
+            diff_pct = abs(explicit_event.amount_home - series.forecast_amount) / series.forecast_amount
+            return diff_pct <= Decimal("0.35")
+        return True
+
+    return False
+
+
 def expand_future_events(
     series_list: List[RecurrenceSeries],
     start_date: date,
@@ -468,8 +548,7 @@ def expand_future_events(
             key = (series.user_id, series.direction.value, series.category)
             if key in explicit_events_by_key:
                 for explicit in explicit_events_by_key[key]:
-                    # If within 3 days of the expected recurring date, explicit event represents this obligation
-                    if abs((explicit.effective_date - cand_date).days) <= 3:
+                    if _is_genuine_duplicate(series, cand_date, explicit):
                         conflicting_event = explicit
                         break
 
