@@ -263,21 +263,18 @@ def calculate_earliest_full_payment_date(
     if is_full_safe_today:
         return request.request_date
 
-    req_amt = request.requested_amount
+    # Mathematical Theorem: If baseline trajectory already breaches safety floor,
+    # placing a non-negative candidate purchase on any date cannot fix a pre-existing breach.
     safety_floor = profile.minimum_balance_to_keep
+    if baseline_simulation.is_safety_floor_breached or baseline_simulation.minimum_projected_available_cash < safety_floor:
+        return None
+
+    req_amt = request.requested_amount
     snaps = baseline_simulation.daily_snapshots
     n_days = len(snaps)
 
     if n_days == 0:
         return None
-
-    # Compute suffix minimums of lowest_available_cash across baseline
-    suffix_mins = [Decimal("0")] * n_days
-    curr_min = snaps[-1].lowest_available_cash
-    for i in range(n_days - 1, -1, -1):
-        if snaps[i].lowest_available_cash < curr_min:
-            curr_min = snaps[i].lowest_available_cash
-        suffix_mins[i] = curr_min
 
     target_required = safety_floor + req_amt
 
@@ -295,17 +292,21 @@ def calculate_earliest_full_payment_date(
     for i in range(n_days):
         cand_date = snaps[i].date
 
-        # If baseline prior to cand_date already breached safety floor,
-        # waiting until cand_date cannot fix the historical breach without a plan
-        if any(snaps[j].lowest_available_cash < safety_floor for j in range(i)):
-            continue
+        # If baseline on day i dips below safety floor, no subsequent date can ever be safe
+        # because the historical trajectory up to day i remains in breach under any later purchase.
+        if snaps[i].lowest_available_cash < safety_floor:
+            break
 
-        # Pruning check:
-        # 1. On cand_date, closing available cash must be >= target_required
+        # Pruning check 1:
+        # On cand_date, closing available cash must be >= target_required (safety_floor + req_amt).
+        # Otherwise, candidate outflow of req_amt leaves closing cash < safety_floor.
         if snaps[i].closing_available_cash < target_required:
             continue
 
-        # 2. On all subsequent days (j > i), lowest available cash must be >= target_required
+        # Pruning check 2:
+        # On all subsequent days (j > i), baseline lowest available cash must be >= target_required.
+        # Since candidate outflow of req_amt translates all subsequent cash states down by req_amt,
+        # any day with baseline lowest cash < safety_floor + req_amt will breach safety_floor.
         if suffix_mins[i + 1] < target_required:
             continue
 
@@ -331,7 +332,6 @@ def calculate_earliest_full_payment_date(
     return None
 
 
-
 def evaluate_request_safe_to_pay(
     request: FinancialRequest,
     baseline_simulation: SimulationResult,
@@ -343,6 +343,7 @@ def evaluate_request_safe_to_pay(
     """Evaluate both amount_safe_to_pay and earliest_date_for_full_payment for a request."""
     safety_floor = profile.minimum_balance_to_keep
     req_amt = request.requested_amount
+    q = quantum or get_currency_quantum(profile.home_currency)
 
     # 1. Compute amount safe to pay today
     safe_amt, cand_res, search_method = calculate_amount_safe_to_pay(
@@ -351,7 +352,7 @@ def evaluate_request_safe_to_pay(
         canonical_events=canonical_events,
         future_events=future_events,
         profile=profile,
-        quantum=quantum,
+        quantum=q,
     )
 
     is_full_safe_today = safe_amt == req_amt
@@ -374,6 +375,9 @@ def evaluate_request_safe_to_pay(
     min_avail_after = cand_res.minimum_projected_available_cash
     margin = min_avail_after - safety_floor
 
+    # Limiting date is directly derived from post-purchase candidate simulation
+    limiting_date = cand_res.minimum_cash_date
+
     reason_if_unsafe: Optional[str] = None
     if not is_full_safe_today:
         if baseline_simulation.is_safety_floor_breached:
@@ -382,12 +386,27 @@ def evaluate_request_safe_to_pay(
                 f"(projected min cash {baseline_simulation.minimum_projected_available_cash} < floor {safety_floor})."
             )
         elif safe_amt < req_amt:
-            limiting_d = baseline_simulation.minimum_cash_date
             headroom = baseline_simulation.minimum_projected_available_cash - safety_floor
             reason_if_unsafe = (
-                f"Full payment would breach safety floor on {limiting_d} "
+                f"Full payment would breach safety floor on {limiting_date} "
                 f"(headroom over 90 days is {headroom}, less than requested {req_amt})."
             )
+
+    # Formal defensive assertions establishing certificate correctness
+    assert safe_amt >= Decimal("0"), "amount_safe_to_pay cannot be negative"
+    assert safe_amt <= req_amt, f"amount_safe_to_pay ({safe_amt}) cannot exceed requested amount ({req_amt})"
+    assert safe_amt % q == Decimal("0"), f"amount_safe_to_pay ({safe_amt}) is not a multiple of quantum ({q})"
+    if safe_amt > Decimal("0"):
+        assert not cand_res.is_safety_floor_breached, (
+            f"Candidate simulation breaches safety floor despite positive safe amount {safe_amt}"
+        )
+        assert min_avail_after >= safety_floor, (
+            f"Post-purchase minimum cash {min_avail_after} < safety floor {safety_floor}"
+        )
+    assert margin == min_avail_after - safety_floor, "safety_floor_margin calculation mismatch"
+    if earliest_date is not None:
+        assert earliest_date >= request.request_date, "earliest_date_for_full_payment cannot precede request date"
+        assert earliest_date <= baseline_simulation.end_date, "earliest_date_for_full_payment cannot exceed horizon"
 
     return SafeToPayCertificate(
         request_id=request.request_id,
@@ -401,7 +420,7 @@ def evaluate_request_safe_to_pay(
         safety_floor=safety_floor,
         baseline_minimum_available_cash=baseline_simulation.minimum_projected_available_cash,
         baseline_minimum_cash_date=baseline_simulation.minimum_cash_date,
-        limiting_date=baseline_simulation.minimum_cash_date,
+        limiting_date=limiting_date,
         available_cash_after_purchase_today=avail_today,
         minimum_available_cash_after_purchase=min_avail_after,
         safety_floor_margin=margin,

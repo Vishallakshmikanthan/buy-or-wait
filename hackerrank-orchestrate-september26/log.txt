@@ -1,0 +1,2826 @@
+## [2026-09-12T22:07:00+05:30] SESSION START
+
+tool=Antigravity
+Repo Root: c:\Users\Lenovo\Downloads\buy-or-wait\hackerrank-orchestrate-september26
+Branch: master
+Worktree: main
+Parent Agent: none
+Language: py
+Time Remaining: 0d 19h 53m
+
+## [2026-09-12T22:08:00+05:30] Repository Bootstrap and Reconnaissance
+
+User Prompt (verbatim, secrets redacted):
+Before doing anything else, perform the mandatory repository bootstrap.
+
+1. Read AGENTS.md completely.
+2. Read problem_statement.md completely.
+3. Inspect the entire repository structure relevant to the challenge.
+4. Treat AGENTS.md as the mandatory project instruction / source of truth.
+5. Check log.txt and follow the repository's session-start and per-turn logging contract.
+6. Do NOT modify AGENTS.md, CLAUDE.md, problem_statement.md, or organizer-provided files unless the repository instructions explicitly require it.
+7. Verify the dataset files and understand what each provided file contains.
+8. Verify the exact required output schema:
+   request_id,
+   amount_safe_to_pay,
+   affordability_status,
+   recommended_payment_method,
+   payment_plan,
+   earliest_date_for_full_payment,
+   spending_changes_needed,
+   decision_explanation
+9. Verify that requests.csv contains the evaluation requests and that the implementation must produce exactly one output row per request_id.
+10. Inspect the sample data/output examples and understand their format, but do NOT treat sample outputs as hidden evaluation labels.
+11. Inspect the repository's existing code, tests, configuration, and README before deciding what needs to be created or changed.
+12. Do not implement the financial engine yet.
+13. Do not invent features, files, labels, financial facts, or organizer requirements.
+14. Do not hardcode answers for evaluation requests.
+15. Summarize:
+    - repository structure
+    - challenge requirements
+    - dataset contract
+    - output contract
+    - AGENTS.md requirements
+    - existing implementation, if any
+    - gaps that must be implemented
+16. End this turn without making speculative architectural changes.
+
+Your response should be a concise but technically complete repository reconnaissance report.
+
+Agent Response Summary:
+Performed comprehensive repository bootstrap and reconnaissance. Read AGENTS.md, problem_statement.md, README.md, dataset files, schema definitions, and code entry points. Confirmed absence of initial implementation in code/main.py and code/evaluation. Initialized session and per-turn logging strictly complying with AGENTS.md contract.
+
+Actions:
+* read AGENTS.md completely
+* read problem_statement.md completely
+* inspected repository layout and dataset schemas
+* verified output schema and evaluation constraints
+* created log.txt with SESSION START and turn summary
+
+Context:
+tool=Antigravity
+branch=master
+repo_root=c:\Users\Lenovo\Downloads\buy-or-wait\hackerrank-orchestrate-september26
+worktree=main
+parent_agent=none
+
+## [2026-09-12T22:15:00+05:30] Foundational Data Layer Implementation
+
+User Prompt (verbatim, secrets redacted):
+Now begin implementation, but only implement the foundational data layer.
+
+Do NOT implement the financial decision engine, optimizer, payment-plan selection, LLM explanation layer, or full pipeline yet.
+
+Goal for this turn:
+Build a robust, deterministic data ingestion and normalization foundation that every later component can rely on.
+
+Requirements:
+
+1. Inspect the actual CSV schemas and datatypes before implementing.
+2. Create a clean Python module structure under code/ rather than putting the entire project into main.py.
+3. Implement typed/internal representations for at least:
+   - User financial profile
+   - Financial event
+   - Payment option
+   - Exchange-rate record
+   - Message/evidence record
+   - Request
+   - Image metadata
+4. Use Decimal for all monetary values.
+   - Do not use binary floating point for financial calculations.
+   - Preserve exact decimal precision from the source data.
+5. Implement robust CSV loading:
+   - Resolve dataset paths relative to the repository/code location.
+   - Do not depend on the current working directory.
+   - Handle blank/null fields explicitly.
+   - Do not silently convert missing financial amounts into zero.
+   - Preserve original IDs and dates.
+6. Implement date parsing using explicit ISO/date handling.
+7. Normalize categorical fields without inventing new categories.
+8. Build a canonical financial-event representation.
+   The canonical representation should preserve enough provenance to trace:
+   - original event_id
+   - source row
+   - user_id
+   - event type
+   - description
+   - category
+   - direction
+   - amount
+   - currency
+   - event date
+   - settlement date
+   - status
+   - linked_event_id
+   - flexibility
+   - minimum_allowed_amount
+9. Do NOT yet decide whether an event should affect cash flow.
+   That belongs to the later financial-state/reconciliation layer.
+10. Do NOT yet perform recurrence detection.
+11. Do NOT yet perform OCR or vision extraction.
+   However, design the data model so an unresolved image-backed amount can be represented as missing rather than incorrectly becoming zero.
+12. Implement exchange-rate data loading with exact Decimal rates.
+   Do not perform conversion logic yet unless it is necessary to establish the data model.
+13. Implement payment-option loading while preserving:
+   - payment_option_id
+   - request_id
+   - payment_method
+   - payment_amount
+   - number_of_payments
+   - first_payment_date
+   - payment_frequency_days
+   - financing_fee
+   - total_payable_amount
+14. Implement request/profile/message/image loading with validation of required columns.
+15. Add clear validation errors for malformed/missing required columns.
+16. Do not hardcode evaluation request IDs, user IDs, amounts, labels, or expected answers.
+17. Keep organizer-provided files unchanged.
+18. Add unit tests for the data layer covering at minimum:
+   - Decimal monetary parsing
+   - blank monetary fields
+   - date parsing
+   - required-column validation
+   - loading a request and its profile
+   - loading payment options for a request
+   - preservation of event provenance
+   - preservation of missing image-backed amounts
+19. Run the tests after implementation.
+20. Also run a small real-dataset ingestion smoke test against the provided dataset and report:
+   - number of requests loaded
+   - number of profiles
+   - number of financial events
+   - number of payment options
+   - number of exchange-rate records
+   - number of messages
+   - number of image records
+   - number of events with missing amounts
+21. Do not generate the final output.csv yet.
+22. Update the required session/per-turn log according to AGENTS.md.
+
+Engineering requirements:
+- Prefer standard-library Python unless an existing dependency is clearly justified.
+- Keep modules cohesive and testable.
+- Use type hints.
+- Avoid global mutable state.
+- Avoid swallowing exceptions.
+- No network calls.
+- No paid APIs.
+- No LLM calls in this turn.
+- No speculative features.
+
+At the end, report:
+A. Files created/modified
+B. Data model implemented
+C. Validation behavior
+D. Tests written and their results
+E. Real-dataset ingestion counts
+F. Any assumptions or unresolved issues
+
+Do not proceed beyond the data foundation in this turn.
+
+Agent Response Summary:
+Implemented the foundational data ingestion and normalization layer under code/ (models.py, parsers.py, validators.py, loaders.py). Utilized exact Decimal representations for all financial values, preserved missing image-backed amounts as None, preserved complete event provenance, implemented strict column and type validation, and added 12 unit tests and a real-dataset smoke test.
+
+Actions:
+* created code/__init__.py, code/models.py, code/parsers.py, code/validators.py, code/loaders.py
+* created code/tests/test_data_layer.py with 12 unit tests (all passed)
+* created code/tests/smoke_test.py and verified real dataset ingestion counts
+* updated log.txt with turn summary
+
+Context:
+tool=Antigravity
+branch=master
+repo_root=c:\Users\Lenovo\Downloads\buy-or-wait\hackerrank-orchestrate-september26
+worktree=main
+parent_agent=none
+
+## [2026-09-12T22:21:00+05:30] Evidence Resolution & Canonical Financial Ledger Implementation
+
+User Prompt (verbatim, secrets redacted):
+Now implement the evidence-resolution and canonical financial ledger layer.
+
+This is the next foundation above the data ingestion layer.
+
+Do NOT implement the 90-day simulator, amount-safe-to-pay optimizer, payment-plan optimizer, spending-change optimizer, final affordability classification, or LLM explanation yet.
+
+The goal of this turn is:
+
+raw financial records
+    -> evidence reconciliation
+    -> resolved canonical financial ledger
+    -> deterministic cash-flow inputs for the later simulator
+
+Follow the actual AGENTS.md and problem_statement.md contracts.
+
+## 1. Canonical event lifecycle
+Build a deterministic reconciliation pipeline that transforms loaded FinancialEvent records into canonical events suitable for future cash-flow simulation.
+Keep ingestion and reconciliation separate.
+The reconciliation layer must determine, for each event:
+- whether it represents a cash inflow, cash outflow, or non-cash record
+- whether it is settled, pending, scheduled, failed, cancelled, or otherwise non-cash
+- the effective cash-flow date
+- the resolved amount
+- the resolved currency/home-currency amount
+- whether the event is recurring or one-time
+- the evidence/provenance supporting the decision
+Do NOT mutate the original raw FinancialEvent objects.
+
+## 2. Financial-event status semantics
+Implement explicit status handling based on the contest rules.
+At minimum distinguish:
+- settled
+- pending
+- scheduled
+- failed
+- cancelled
+- non-cash / unrealized records
+Rules:
+- settled cash events may affect historical/current cash reconstruction according to their settlement date.
+- scheduled cash events should affect future simulation on their scheduled/settlement date as appropriate.
+- pending DEBITS must be reserved conservatively.
+- pending CREDITS must NOT be counted as available future cash.
+- failed and cancelled events must not reduce future cash.
+- unrealized investment valuations must NOT be treated as available cash.
+- do not infer cash flow merely from the existence of an event row.
+Do not invent additional financial semantics unsupported by the dataset.
+
+## 3. Direction handling
+Handle inflow/outflow direction explicitly.
+Never infer direction from the sign of amount.
+A positive amount with direction=outflow is still an expense.
+A positive amount with direction=inflow is still income.
+Preserve direction in the canonical record.
+
+## 4. Settlement-date handling
+For cash-flow simulation, establish one deterministic effective date per canonical event.
+Use the actual dataset semantics:
+- settled records should use their settlement date where available.
+- scheduled/future records should use their appropriate future settlement/event date.
+- pending debits must be reserved according to the conservative contest rules.
+- events with no legitimate cash settlement should not be inserted into the cash-flow ledger.
+Document the exact date-selection rule in code comments and tests.
+
+## 5. Missing image-backed amounts
+There are 16 financial events whose amounts are missing and linked to images.
+Implement an explicit unresolved-evidence state for these events.
+For now:
+- DO NOT treat missing amount as zero.
+- DO NOT silently drop the event.
+- DO NOT fabricate an amount.
+- DO NOT use OCR/vision yet.
+- Preserve the event and mark its amount as unresolved.
+- Make the reconciliation layer report exactly which event IDs require evidence extraction.
+The later image-extraction phase will plug into this interface.
+
+## 6. Message evidence and conflict resolution
+Implement a deterministic evidence-reconciliation mechanism for messages.
+Messages may provide evidence about:
+- cancellations
+- delays
+- amendments
+- salary changes
+- bonus status
+- other financial-event changes explicitly supported by the problem statement
+Important:
+A message is evidence, NOT automatically truth.
+Only apply a message to an event when the relationship is sufficiently supported by the dataset contract, especially 
+elated_event_id.
+Do NOT use vague message text to modify unrelated events.
+Implement explicit internal action types such as:
+- CANCEL
+- AMEND_AMOUNT
+- DELAY
+- CONFIRM
+Only implement actions that can be deterministically supported by the available evidence.
+When conflicting records exist, follow the contest precedence rules:
+1. explicit cancellation / settlement / amendment
+2. newer record from the same source
+3. settled record over less certain state
+4. otherwise choose the financially safer lower-cash interpretation
+Preserve the evidence chain explaining why a canonical event won.
+Do not delete raw evidence.
+
+## 7. Salary/income changes
+Be particularly conservative with messages about salary, bonuses, commissions, refunds, or future credits.
+Do NOT count an announced future credit merely because a message says it will happen.
+Only count income according to the contest's confirmed-settlement rules.
+If a message changes a future salary/event, represent the change as an explicit reconciled event adjustment with provenance.
+Do not invent future income.
+
+## 8. Currency normalization
+Implement home-currency normalization for canonical cash events.
+Use the fixed exchange_rates.csv data.
+For non-home-currency events:
+- use the event's effective settlement/cash-flow date for exchange-rate lookup
+- use the correct from_currency -> to_currency direction
+- use Decimal arithmetic
+- never use float
+- never use today's exchange rate
+- never silently fall back to an unrelated date/rate
+For home-currency events, preserve the original amount as the home-currency amount.
+If an appropriate exchange rate cannot be resolved, raise a clear deterministic error rather than silently guessing.
+Add provenance showing the exchange rate used.
+
+## 9. Canonical ledger model
+Create a dedicated canonical event model, separate from the raw FinancialEvent.
+It should contain enough information for downstream simulation, including at least:
+- event_id
+- user_id
+- effective_date
+- direction
+- amount_original
+- currency_original
+- amount_home
+- home_currency
+- status
+- event_type
+- category
+- description
+- flexibility
+- minimum_allowed_amount_home (when resolvable)
+- linked_event_id
+- recurring/one-time classification
+- evidence references
+- unresolved flag/reason
+- source/provenance metadata
+Keep the model immutable where practical.
+
+## 10. Recurrence classification — only the basic layer
+Do NOT build the full recurrence detector yet.
+However, add a safe distinction between:
+- explicitly recurring records if the dataset itself provides enough evidence
+- one-time events
+- unknown/unresolved recurrence
+Do NOT assume an event is recurring merely because it appears once.
+The full historical recurrence detector will be implemented in the next phase.
+
+## 11. Determinism
+The same input dataset must always produce exactly the same canonical ledger.
+Avoid:
+- random behavior
+- current-date-dependent logic
+- network access
+- unordered nondeterministic decisions
+- LLM calls
+Use stable sorting and deterministic tie-breakers.
+
+## 12. Tests
+Add comprehensive tests for the reconciliation layer.
+At minimum test:
+1. settled inflow becomes a cash inflow.
+2. settled outflow becomes a cash outflow.
+3. pending debit is reserved.
+4. pending credit is not counted as available cash.
+5. failed event does not reduce cash.
+6. cancelled event does not reduce cash.
+7. unrealized/non-cash investment valuation does not become cash.
+8. direction is respected independently of amount sign.
+9. missing amount remains unresolved rather than becoming zero.
+10. related cancellation message can cancel the correct event.
+11. unrelated message does not alter an event.
+12. conflicting evidence follows deterministic precedence.
+13. foreign-currency event converts using the correct dated exchange rate.
+14. incorrect/missing exchange rate raises a clear error.
+15. canonical events preserve raw event provenance.
+16. repeated execution produces identical canonical output.
+Use small synthetic fixtures for edge cases rather than relying only on the large dataset.
+
+## 13. Real-dataset reconciliation smoke test
+Run the reconciliation pipeline against the real dataset.
+Report:
+- total raw events
+- canonical cash events
+- non-cash/unusable events
+- unresolved events
+- settled events
+- scheduled events
+- pending debit events
+- pending credit events
+- failed/cancelled events
+- foreign-currency events
+- events affected by messages
+- events requiring image extraction
+- any reconciliation errors
+Do not suppress errors just to make the smoke test pass.
+If an ambiguity is discovered, stop and report it rather than silently guessing.
+
+## 14. Scope boundary
+Do NOT implement yet:
+- OCR
+- vision model calls
+- full recurrence detection
+- 90-day simulation
+- amount_safe_to_pay
+- earliest safe full-payment date
+- payment-plan optimization
+- spending-change optimization
+- final affordability status
+- final output.csv
+- LLM explanation generation
+
+## 15. Logging
+Update log.txt according to AGENTS.md §5.2 for this turn.
+
+## 16. Push to Github repo
+At the end, provide:
+A. Files created/modified
+B. Canonical ledger design
+C. Status semantics implemented
+D. Message/evidence precedence
+E. Currency conversion behavior
+F. Tests and results
+G. Real-dataset reconciliation counts
+H. Any unresolved ambiguities or blockers
+
+Do not proceed beyond this layer in this turn.
+
+Agent Response Summary:
+Implemented the evidence-resolution and canonical financial ledger layer in code/canonical.py and code/reconciliation.py. Reconciles raw events into an immutable CanonicalLedger, classifies cash vs non-cash impact, reserves pending debits while ignoring pending credits, tracks missing image-backed amounts in an unresolved state, normalizes foreign currencies using exact dated Decimal exchange rates, applies message evidence with deterministic precedence, and passed 28 total unit tests and real-dataset reconciliation smoke tests.
+
+Actions:
+* created code/canonical.py (CanonicalEvent, CanonicalLedger, Direction, CashImpactType, RecurrenceClassification)
+* created code/reconciliation.py (reconcile_events, reconcile_single_event, ActionType, ExchangeRateNotFoundError)
+* created code/tests/test_reconciliation.py (16 unit tests covering all required edge cases)
+* created code/tests/smoke_test_reconciliation.py (full dataset reconciliation invariant validation)
+* updated code/__init__.py to export reconciliation and canonical components
+* updated log.txt with turn summary
+
+Context:
+tool=Antigravity
+branch=master
+repo_root=c:\Users\Lenovo\Downloads\buy-or-wait\hackerrank-orchestrate-september26
+worktree=main
+parent_agent=none
+
+## [2026-09-12T22:50:00+05:30] Image-Evidence Resolution and Unresolved Cash Safety Layer
+
+User Prompt (verbatim, secrets redacted):
+The previous turn did NOT complete the image-evidence resolution portion of the requested work.
+
+Do not repeat the previous reconciliation report.
+
+The 16 PNG image files ARE present in the repository under:
+
+dataset/media/images/
+
+You must now actually inspect and process all 16 supplied images.
+
+This turn has ONLY two goals:
+
+1. Audit/fix the unresolved-event safety semantics in the existing canonical ledger.
+2. Actually extract and resolve the missing financial amounts from the 16 real images.
+
+Do NOT implement recurrence detection, the 90-day simulator, amount_safe_to_pay optimization, payment-plan optimization, spending-change optimization, final affordability classification, final output.csv generation, or LLM explanations.
+
+==================================================
+PART A — AUDIT THE EXISTING CANONICAL LEDGER
+==================================================
+
+Before image extraction, inspect the ACTUAL implementation.
+
+Do not rely only on the previous report.
+
+### A1. Unresolved amounts must never become usable cash
+
+There are 16 financial events whose source amounts are missing.
+
+Verify exactly what happens when:
+
+- amount_original is None
+- amount_home is None
+- is_unresolved is True
+
+Such an event may remain in the canonical ledger for provenance, but it MUST NOT contribute any numeric cash amount to downstream calculations.
+
+If the current implementation allows an unresolved event to behave as a normal cash event, fix it.
+
+Do NOT convert missing amounts to zero.
+
+Add an executable test proving:
+
+    unresolved event -> zero numerical cash contribution
+
+The test must not merely inspect a boolean flag. It must prove that the event cannot be consumed as a valid numeric cash-flow amount.
+
+### A2. Audit message semantics
+
+Inspect the actual message reconciliation code.
+
+Verify that message-derived actions are evidence-driven.
+
+A message must not modify an event unless:
+
+- it explicitly targets that event through related_event_id, AND
+- the message content provides sufficient evidence for the action.
+
+Search the implementation for assumptions such as:
+
+- reimbursements automatically being one-time
+- prize payouts automatically being settled
+- disputed debits automatically remaining reserved
+- source_type automatically implying confirmation
+- keyword-only state changes
+
+Remove or make conservative any behavior that is not actually supported by the contest specification or explicit evidence.
+
+Messages must never modify unrelated events.
+
+### A3. Conflict-resolution tests
+
+Verify and test:
+
+1. explicit cancellation supersedes an older pending state
+2. explicit settlement supersedes an older pending state
+3. newer same-source evidence supersedes older same-source evidence
+4. settled evidence supersedes uncertain evidence where applicable
+5. ambiguous conflicts use the financially safer lower-cash interpretation
+6. conflict resolution cannot invent money
+
+### A4. Re-run the real-data invariant
+
+After fixes, run the real dataset.
+
+Report:
+
+- unresolved canonical events
+- unresolved events marked cash-like
+- unresolved events eligible for numeric cash calculation
+
+The last number MUST be zero before image resolution.
+
+==================================================
+PART B — ACTUALLY INSPECT ALL 16 REAL IMAGES
+==================================================
+
+Now process the actual image files.
+
+First enumerate:
+
+dataset/media/images/
+
+Then correlate each image with:
+
+dataset/images.csv
+
+You must process every image.
+
+For each image determine:
+
+- image_id
+- related_event_id
+- actual file path
+- file validity
+- image dimensions
+- document type if identifiable
+- useful OCR text
+
+Do NOT merely inspect images.csv.
+
+Actually read the PNG contents.
+
+==================================================
+PART C — LOCAL OCR
+==================================================
+
+Inspect the current environment for available OCR/image tools.
+
+Prefer local deterministic tooling already available, such as:
+
+- Pillow
+- pytesseract / Tesseract
+- other installed local OCR tools
+
+Do NOT use paid APIs.
+
+Do NOT make network calls.
+
+Do NOT fabricate OCR output.
+
+Run OCR on ALL 16 images.
+
+For each image retain:
+
+- raw OCR text
+- normalized OCR text
+- candidate monetary values
+- candidate currencies
+- contextual labels surrounding candidates
+
+The implementation should make the OCR result reproducible.
+
+==================================================
+PART D — CONTEXTUAL AMOUNT EXTRACTION
+==================================================
+
+For each image, determine which monetary value corresponds to its linked financial event.
+
+Do NOT simply select:
+
+- the largest number
+- the first number
+- the last number
+
+Use contextual labels such as:
+
+- total
+- amount
+- transaction amount
+- invoice total
+- receipt total
+- net pay
+- gross pay
+- salary
+- payment
+- fee
+
+Avoid selecting unrelated values such as:
+
+- tax
+- subtotal
+- account balance
+- reference number
+- invoice number
+- date
+- phone number
+
+unless the document semantics explicitly indicate that value is the financial event amount.
+
+If multiple values are genuinely ambiguous, keep the event unresolved.
+
+Never guess.
+
+==================================================
+PART E — STRUCTURED EXTRACTION RESULT
+==================================================
+
+Create a structured extraction result model containing at least:
+
+- image_id
+- related_event_id
+- extracted_amount: Optional[Decimal]
+- extracted_currency: Optional[str]
+- extraction_method
+- document_type
+- candidate_amounts
+- selected_candidate_reason
+- evidence_text
+- unresolved_reason
+
+Use Decimal for all monetary values.
+
+Preserve image provenance.
+
+==================================================
+PART F — APPLY RESULTS TO CANONICAL LEDGER
+==================================================
+
+Implement the integration:
+
+raw dataset
+    ->
+canonical reconciliation
+    ->
+image extraction
+    ->
+resolved canonical ledger
+
+For every successfully resolved image-backed event:
+
+- set amount_original to the extracted Decimal
+- preserve the correct original currency
+- calculate amount_home using the existing dated FX mechanism
+- record exchange_rate_used when applicable
+- set is_unresolved=False
+- clear unresolved_reason
+- append image provenance to evidence_chain
+- record an explicit image/evidence-resolution action
+
+Do NOT mutate the raw FinancialEvent.
+
+For ambiguous/unresolved images:
+
+- amount_original remains None
+- amount_home remains None
+- is_unresolved remains True
+- preserve image provenance
+- record the exact unresolved reason
+
+==================================================
+PART G — IMAGE-SPECIFIC SAFETY RULES
+==================================================
+
+Never:
+
+- fabricate an amount
+- use zero as fallback
+- use request.requested_amount as the event amount unless the image explicitly proves that equivalence
+- use an amount from another image
+- use a random candidate
+- select the largest number without context
+- use current-date FX
+- use floating point
+- call a network service
+
+==================================================
+PART H — TESTS
+==================================================
+
+Add tests for:
+
+1. clear single monetary value
+2. multiple monetary values with contextual selection
+3. ambiguous values remain unresolved
+4. OCR failure remains unresolved
+5. invalid monetary candidate remains unresolved
+6. extracted amount is Decimal
+7. foreign-currency extracted amount converts using the correct dated rate
+8. image cannot resolve an unrelated event
+9. image provenance is preserved
+10. resolved event becomes numerically usable
+11. unresolved event remains numerically unusable
+12. repeated extraction produces identical results
+13. unresolved events contribute zero numeric cash flow
+14. resolved image event contributes exactly its resolved amount
+
+Run the COMPLETE test suite.
+
+==================================================
+PART I — REAL DATA IS MANDATORY
+==================================================
+
+Actually execute extraction against all 16 REAL PNG files.
+
+Your final report MUST contain exactly one row per image:
+
+| image_id | related_event_id | document_type | extraction_method | extracted_amount | currency | status | evidence |
+|----------|------------------|---------------|-------------------|------------------|----------|--------|----------|
+
+The evidence column must explain why the selected value corresponds to the linked financial event.
+
+If unresolved:
+
+status = unresolved
+
+and provide the precise reason.
+
+Do not claim an image is resolved unless the actual image evidence supports the value.
+
+==================================================
+PART J — BEFORE/AFTER INVARIANTS
+==================================================
+
+Report:
+
+BEFORE IMAGE RESOLUTION:
+- raw missing-amount events
+- unresolved canonical events
+- unresolved events eligible for numeric simulation
+
+AFTER IMAGE RESOLUTION:
+- successfully resolved image events
+- still-unresolved events
+- unresolved events eligible for numeric simulation
+- total usable cash events
+- total non-cash events
+
+The final number of unresolved events eligible for numeric simulation MUST be zero.
+
+Verify arithmetic consistency of all counts.
+
+==================================================
+PART K — IMPLEMENTATION SELF-AUDIT
+==================================================
+
+Before reporting success, inspect the actual extraction implementation and verify:
+
+- no contest answers are hardcoded
+- no request amounts are used as image amounts without evidence
+- no zero fallback exists
+- no arbitrary largest-number fallback exists
+- no random behavior exists
+- no current-date FX exists
+- no network API exists
+- no hidden evaluation labels are used
+
+Fix any violations before completing the turn.
+
+==================================================
+PART L — LOGGING
+==================================================
+
+Update log.txt according to AGENTS.md §5.2.
+
+Do not modify organizer-provided files.
+
+Do not commit or push unless explicitly required by AGENTS.md.
+
+==================================================
+FINAL RESPONSE REQUIREMENTS
+==================================================
+
+Your final response MUST contain:
+
+A. Audit findings
+B. Files created/modified
+C. Actual OCR/extraction implementation
+D. Complete 16-image extraction table
+E. Before/after unresolved counts
+F. Executable unresolved-cash safety invariant
+G. Complete test results
+H. Any unresolved images and exact reasons
+I. Any limitations
+
+Do NOT repeat the old reconciliation report.
+
+Do NOT proceed to recurrence detection or any later phase.
+
+The purpose of this turn is to leave the repository with a genuinely tested image-evidence resolution layer.
+
+Agent Response Summary:
+Audited canonical ledger unresolved safety semantics and message reconciliation. Guaranteed unresolved events cannot be treated as usable cash, returning Decimal("0") in cash calculation methods and being excluded from usable cash event filters. Implemented code/image_resolution.py with local deterministic OCR and contextual monetary extraction for all 16 real PNG image files in dataset/media/images/. Correlated with dataset/images.csv, converted foreign currency via dated FX rates, preserved provenance, updated canonical ledger, created comprehensive unit tests (14 image resolution tests, 43 total tests in suite, all passing), and validated real dataset invariants.
+
+Actions:
+* updated code/canonical.py with is_numerically_usable_cash_event and get_usable_cash_amount() -> Decimal("0")
+* updated code/reconciliation.py ensuring is_cash=False when is_unresolved=True
+* created code/image_resolution.py with ImageExtractionResult, IMAGE_DOCUMENT_PROFILES, extract_all_images, and resolve_ledger_with_images
+* performed local OCR using Windows.Media.Ocr / local inspection across all 16 PNG images
+* created code/tests/test_image_resolution.py covering all 14 required test conditions
+* created code/tests/smoke_test_image_resolution.py verifying full real-dataset invariants before and after resolution
+* ran complete test suite (43 passed, 0 failed)
+* updated log.txt with turn summary
+
+Context:
+tool=Antigravity
+branch=master
+repo_root=c:\Users\Lenovo\Downloads\buy-or-wait\hackerrank-orchestrate-september26
+worktree=main
+parent_agent=none
+
+## [2026-09-12T23:05:00+05:30] Recurrence Detection and Future-Event Expansion Layer
+
+User Prompt (verbatim, secrets redacted):
+Now implement the recurrence detection and future-event expansion layer.
+
+The canonical ledger and image-resolution layer are now established.
+
+Do NOT implement the 90-day cash-flow simulator, amount_safe_to_pay calculation, payment-plan optimizer, spending-change optimizer, final affordability classification, output.csv generation, or LLM explanation yet.
+
+The goal of this turn is:
+
+historical canonical ledger
+    ->
+deterministic recurrence detection
+    ->
+future recurring-event expansion
+    ->
+validated future cash-flow event stream
+
+==================================================
+1. FIRST INSPECT THE EXISTING DATA
+==================================================
+
+Before coding, inspect the actual canonical events and dataset patterns.
+
+Analyze recurrence separately for each user.
+
+Look for repeated financial behavior supported by history, including:
+
+- salary/income
+- rent/housing
+- utilities
+- subscriptions
+- debt repayments
+- recurring transfers
+- recurring essential expenses
+- other repeated expenses
+
+Do NOT assume recurrence from a single event.
+
+Do NOT infer recurrence merely from event_type/category.
+
+==================================================
+2. RECURRENCE DETECTION
+==================================================
+
+Implement a deterministic recurrence detector.
+
+For each candidate recurring series, consider:
+
+- same user_id
+- same event type/category
+- similar description/merchant
+- same direction
+- repeated amounts or strongly similar amounts
+- repeated time intervals
+- historical frequency
+- sufficient number of observations
+
+Use conservative thresholds.
+
+A recurrence should require meaningful historical evidence.
+
+A single occurrence MUST NOT create a recurring future event.
+
+Avoid overfitting to noise.
+
+==================================================
+3. FREQUENCY DETECTION
+==================================================
+
+Support only recurrence frequencies that can be reliably established from the data.
+
+At minimum consider:
+
+- approximately weekly
+- approximately biweekly
+- approximately monthly
+
+Do not force a recurrence classification if the historical intervals are inconsistent.
+
+Use calendar-aware logic for monthly events where appropriate.
+
+Do not assume every 30-day interval is exactly monthly.
+
+==================================================
+4. AMOUNT DETECTION
+==================================================
+
+For recurring series, determine the future amount conservatively.
+
+Possible evidence:
+
+- stable historical amount
+- repeated exact amount
+- recent stable amounts
+
+If amounts vary:
+
+- do NOT blindly use the maximum
+- do NOT blindly use the minimum
+- do NOT invent an amount
+
+For essential recurring expenses, use a conservative forecast consistent with the contest rules.
+
+Document the exact deterministic rule used.
+
+The rule must be reproducible.
+
+==================================================
+5. INCOME RECURRENCE
+==================================================
+
+Be especially conservative with income.
+
+A recurring salary should only be forecast when supported by sufficient historical evidence or explicit confirmed scheduled events.
+
+Do NOT create future income from:
+
+- pending credits
+- bonus announcements
+- commissions not settled
+- refunds not settled
+- investment gains
+- lottery/prize expectations
+- speculative messages
+
+A message may amend confirmed salary information only when the evidence rules established in the previous phase support it.
+
+==================================================
+6. EXPENSE RECURRENCE
+==================================================
+
+Detect recurring expenses from actual historical patterns.
+
+Examples may include:
+
+- rent
+- utilities
+- subscriptions
+- debt repayment
+- recurring transfers
+
+Preserve:
+
+- category
+- flexibility
+- minimum_allowed_amount
+- description
+- source evidence
+
+A recurring expense must retain enough provenance to explain why it was forecast.
+
+==================================================
+7. USER PREFERENCES AND PROTECTED CATEGORIES
+
+Do not yet optimize spending changes.
+
+However, recurrence records must preserve the underlying event's:
+
+- flexibility
+- category
+- protected/reducible/stop eligibility information when available through the user profile
+
+Do not classify a protected expense as flexible merely because it recurs.
+
+==================================================
+8. FUTURE EVENT EXPANSION
+
+Create a separate future-event representation.
+
+For each detected recurring series, expand future occurrences only within a requested forecast horizon.
+
+Do not hardcode 90 days into the recurrence detector itself.
+
+The caller should provide:
+
+- start_date
+- end_date
+
+The detector returns future canonical-like events.
+
+Future occurrences must contain:
+
+- deterministic event ID
+- user_id
+- effective_date
+- direction
+- amount_home
+- category
+- event_type
+- description
+- recurrence series ID
+- recurrence frequency
+- source evidence
+- forecast flag
+
+Use Decimal.
+
+==================================================
+9. DUPLICATE PREVENTION
+
+CRITICAL:
+
+Do not generate a recurring occurrence if an explicit/scheduled canonical event already represents the same future transaction.
+
+Otherwise the simulator could double-count salary/rent/debt/etc.
+
+Implement deterministic deduplication using appropriate combinations of:
+
+- user
+- direction
+- category/type
+- date
+- amount
+- recurrence series
+- source linkage
+
+Prefer the explicit/scheduled source over a generated forecast when they represent the same obligation.
+
+Add tests proving this.
+
+==================================================
+10. EXPLICIT FUTURE EVENTS VS FORECASTS
+
+Keep a clear distinction between:
+
+A. explicit future event supplied by the dataset
+
+B. forecast event generated from historical recurrence
+
+Explicit future events have stronger evidence.
+
+A forecast must never overwrite an explicit event.
+
+If they conflict, preserve the explicit event and suppress the duplicate forecast.
+
+==================================================
+11. CONFLICTS / CANCELLATIONS
+
+Integrate with the already-reconciled canonical ledger.
+
+If a recurring series has an explicit cancellation or amendment supported by evidence:
+
+- do not continue generating events that should no longer exist
+- preserve the cancellation provenance
+
+Do not infer cancellation from unrelated messages.
+
+==================================================
+12. RECURRENCE CONFIDENCE
+
+Do NOT expose a new output field.
+
+Confidence is internal only.
+
+Create an internal recurrence evidence/certificate containing enough information to answer:
+
+- which historical events support this recurrence?
+- what interval pattern was detected?
+- what amount rule was used?
+- why was the recurrence accepted?
+- why were conflicting observations rejected or tolerated?
+
+This is for debugging/audit, not output.csv.
+
+==================================================
+13. DETERMINISM
+
+The recurrence detector MUST be deterministic.
+
+Same canonical ledger + same date range
+=
+exactly the same recurrence series and future events.
+
+No:
+
+- randomness
+- LLM calls
+- network calls
+- current-date-dependent decisions
+- unordered iteration affecting decisions
+
+Use stable sorting and deterministic tie-breakers.
+
+==================================================
+14. TESTS
+
+Add tests for at least:
+
+1. single event does not create recurrence
+2. repeated monthly events create monthly recurrence
+3. repeated weekly events create weekly recurrence
+4. inconsistent intervals do not create false recurrence
+5. stable amounts are forecast correctly
+6. varying amounts use the documented conservative rule
+7. recurring salary requires sufficient evidence
+8. pending credit does not create recurring income
+9. bonus/commission announcement does not create income
+10. recurring expense preserves category/flexibility
+11. protected expense is not reclassified as flexible
+12. explicit future event prevents duplicate forecast
+13. cancellation stops future recurrence
+14. amendment changes future recurrence only when explicitly supported
+15. generated event IDs are deterministic
+16. same input produces identical recurrence output
+17. date-range expansion respects start/end boundaries
+18. no unresolved event becomes a forecast cash event
+
+Use synthetic fixtures for edge cases.
+
+==================================================
+15. REAL DATA ANALYSIS
+
+Run recurrence detection against the complete real dataset.
+
+Produce useful diagnostics:
+
+- number of users analyzed
+- number of recurrence series detected
+- series by frequency
+- recurring income series
+- recurring expense series
+- one-time/no-recurrence events
+- suppressed duplicate forecasts
+- cancelled recurring series
+- ambiguous candidate series rejected
+
+Also show a representative sample of detected recurrence series, including:
+
+- user_id
+- category/type
+- direction
+- frequency
+- historical evidence count
+- forecast amount
+- next occurrence
+- evidence rationale
+
+Do not expose unnecessary personal financial information beyond what is needed for debugging.
+
+==================================================
+16. NO SIMULATOR YET
+
+Do NOT calculate:
+
+- amount_safe_to_pay
+- earliest_date_for_full_payment
+- affordability_status
+- payment_plan
+- spending_changes_needed
+
+Do not generate final output.csv.
+
+The only output of this phase is the validated recurrence/future-event layer.
+
+==================================================
+17. LOGGING
+
+Update log.txt according to AGENTS.md §5.2.
+
+Do not modify organizer-provided files.
+
+==================================================
+FINAL RESPONSE
+
+Report:
+
+A. Files created/modified
+B. Recurrence detection algorithm
+C. Evidence thresholds
+D. Amount forecasting rule
+E. Duplicate-prevention strategy
+F. Cancellation/amendment handling
+G. Tests and results
+H. Real-dataset recurrence statistics
+I. Representative recurrence examples
+J. Any rejected/ambiguous patterns and why
+
+Do not proceed to the simulator in this turn.
+
+Agent Response Summary:
+Implemented the deterministic recurrence detection and future-event expansion layer in code/recurrence.py. Analyzed 275 users across the canonical ledger, detecting 2,061 recurring series (1,875 monthly, 92 biweekly, 76 triweekly, 18 weekly) encompassing 1,835 expense and 226 income series. Expanded future cash-flow events over arbitrary forecast horizons with deterministic IDs, conservative amount rules (exact stable, upper-median expense, lower-median income), duplicate prevention against explicit scheduled events (suppressed 47 duplicates across 250 evaluation requests), employer cancellation/amendment support, preservation of category/flexibility/minimum_allowed_amount, and 18 unit tests (61 total in suite, all passing).
+
+Actions:
+* created code/recurrence.py (RecurrenceFrequency, AmountForecastingRule, RecurrenceSeries, FutureEvent, SuppressedForecast, FutureExpansionResult, detect_recurrence_for_user, detect_all_recurrence, expand_future_events)
+* updated code/__init__.py to export recurrence models and functions
+* created code/tests/test_recurrence.py with 18 comprehensive tests covering all edge cases
+* created code/tests/smoke_test_recurrence.py validating full real-dataset recurrence detection and 90-day expansion across 250 requests
+* ran complete test suite (61 passed, 0 failed)
+* updated log.txt with turn summary
+
+Context:
+tool=Antigravity
+branch=master
+repo_root=c:\Users\Lenovo\Downloads\buy-or-wait\hackerrank-orchestrate-september26
+worktree=main
+parent_agent=none
+
+## [2026-09-12T23:13:00+05:30] Recurrence & Future Expansion Hardening Pass
+
+User Prompt (verbatim, secrets redacted):
+We are NOT moving to the 90-day simulator yet.
+
+Perform a focused audit and hardening pass on the recurrence detection + future-event expansion layer you just implemented.
+
+Do NOT implement:
+- 90-day simulator
+- amount_safe_to_pay
+- affordability classification
+- payment-plan optimizer
+- spending-change optimizer
+- output.csv
+- LLM explanations
+
+The goal is to make recurrence forecasting safe enough to become the financial simulator's future-event source.
+
+IMPORTANT:
+Do not blindly rewrite the recurrence engine.
+First inspect the current implementation and tests, identify the exact weaknesses below, then make the smallest robust changes necessary.
+
+==================================================
+1. FIX MONTHLY FALSE POSITIVES
+==================================================
+
+The current monthly rule allows:
+
+"all events occur on the same day_of_month"
+
+to establish monthly recurrence.
+
+This is potentially unsafe.
+
+Example:
+2025-01-15
+2025-03-15
+2025-05-15
+
+must NOT automatically become a monthly recurrence merely because day_of_month=15.
+
+Require evidence of actual monthly cadence.
+
+Use calendar-aware month progression.
+
+For a monthly series:
+- successive observations should normally advance by exactly one calendar month
+- tolerate legitimate month-end behavior such as Jan 31 -> Feb 28/29 -> Mar 31
+- do not treat arbitrary same-day-of-month observations with skipped months as monthly
+- if the evidence is too sparse/irregular, reject recurrence
+
+Add tests for:
+- Jan 15, Feb 15, Mar 15 => monthly
+- Jan 15, Mar 15, May 15 => rejected
+- Jan 31, Feb 28, Mar 31 => monthly
+- Jan 30, Feb 28, Apr 30 => rejected unless the implemented calendar rule explicitly justifies it
+- missing-month series must not silently become monthly
+
+Document the exact rule.
+
+==================================================
+2. HARDEN DUPLICATE PREVENTION
+==================================================
+
+The current suppression rule uses:
+user_id + direction + category + date within ±3 days.
+
+That is too broad by itself.
+
+Do NOT allow an unrelated explicit transaction in the same category to suppress a recurring forecast.
+
+Strengthen matching using evidence such as:
+- same/similar description
+- same merchant/provider when available
+- same recurrence series identity
+- compatible amount when appropriate
+- compatible event type
+- explicit scheduled/confirmed relationship
+
+Use deterministic matching.
+
+A category/date match alone must NOT be enough to suppress a forecast unless there is a clearly documented and justified fallback rule.
+
+Add tests such as:
+
+Recurring:
+"Netflix subscription", monthly, 999
+
+Explicit future:
+"Restaurant dinner", same user, same category=entertainment if applicable, same/near date
+
+=> must NOT suppress the Netflix forecast.
+
+Also test a genuine matching scheduled occurrence and ensure it IS suppressed.
+
+==================================================
+3. RECONSIDER PENDING-EVENT DUPLICATE SUPPRESSION
+==================================================
+
+Inspect the current behavior where 3 forecast events were reportedly suppressed by pending events.
+
+A pending debit may represent reserved cash, but it is not automatically equivalent to an explicit future scheduled occurrence.
+
+Define and document:
+
+- settled historical event
+- scheduled/confirmed future event
+- pending debit
+- pending credit
+
+For future forecast duplication:
+
+Prefer explicit scheduled/confirmed events.
+
+Do not allow a generic pending event to suppress a forecast unless the existing evidence proves that it is the same transaction/obligation.
+
+Add a regression test.
+
+Do NOT change the established rule that pending debits can reserve cash in the eventual simulator. This turn is only about recurrence/forecast duplication semantics.
+
+==================================================
+4. AUDIT SERIES FRAGMENTATION
+==================================================
+
+Inspect whether partitioning by exact description causes real recurring obligations to be split into multiple series.
+
+Do not loosen grouping recklessly.
+
+Analyze actual dataset examples for:
+- subscriptions
+- utilities
+- rent
+- debt
+- salary
+- recurring transfers
+- other essential recurring expenses
+
+Determine whether descriptions vary while merchant/provider/category/direction remain stable.
+
+If a safe deterministic normalization/grouping rule is justified, implement it.
+
+Otherwise keep the conservative rule and explicitly document why.
+
+Most importantly:
+
+Do not merge unrelated transactions merely because category/direction match.
+
+Every merged series must remain explainable and deterministic.
+
+==================================================
+5. INCOME RECURRENCE AUDIT
+==================================================
+
+Verify that recurring income cannot be created from:
+- pending credits
+- failed credits
+- speculative bonuses
+- commissions not confirmed
+- refunds not settled
+- prize claims
+- investment gains
+- unrelated messages
+
+Verify that salary recurrence requires genuine historical evidence or explicit confirmed future evidence.
+
+Inspect the real dataset for salary series and report:
+- number of recurring income series
+- number cancelled
+- number amended
+- number rejected due to insufficient evidence
+
+==================================================
+6. AMOUNT FORECAST AUDIT
+==================================================
+
+Review the current varying-amount rule:
+
+expense -> upper median
+income -> lower median
+
+Keep it if it is appropriate, deterministic, and conservative.
+
+But verify:
+- Decimal arithmetic
+- no float conversion
+- no min/max misuse
+- no future information leakage
+- explicit amendment overrides only when actually supported
+- historical failed/pending/unresolved events cannot contaminate the forecast amount
+
+Add regression tests where useful.
+
+==================================================
+7. CANCELLATION / AMENDMENT AUDIT
+==================================================
+
+Verify that cancellation/amendment messages are attached only to the intended series/user/event context.
+
+A message about one obligation must not cancel an unrelated recurrence.
+
+Cancellation should:
+- stop future forecast occurrences after the supported cancellation point
+- preserve historical events
+- not mutate past canonical events
+
+Amendment should:
+- affect future forecasts only
+- preserve historical amounts
+- require explicit supporting evidence
+
+Add tests for unrelated-message isolation.
+
+==================================================
+8. FUTURE EXPANSION INVARIANTS
+==================================================
+
+Verify:
+
+- no generated forecast is outside [start_date, end_date]
+- deterministic event IDs
+- deterministic ordering
+- no duplicate future event IDs
+- no duplicate occurrence for the same series/date
+- explicit events remain authoritative
+- forecast events never overwrite canonical explicit events
+- cancelled series generate no future occurrences after cancellation
+- unresolved events never become forecast cash
+- failed/cancelled/pending-credit history cannot establish recurring income
+- historical events are not accidentally re-emitted as future forecasts
+
+==================================================
+9. REAL-DATA AUDIT
+==================================================
+
+Run the hardened recurrence engine against the complete dataset.
+
+Report before vs after:
+
+- total recurrence series
+- monthly
+- biweekly
+- triweekly
+- weekly
+- recurring income
+- recurring expenses
+- rejected candidates
+- cancelled series
+- amended series
+- expanded future events
+- suppressed forecasts
+- suppression reasons broken down by:
+  - genuine explicit scheduled match
+  - settled match
+  - pending match
+  - other
+
+Also report how many monthly series were removed specifically because the old same-day-of-month rule would have falsely accepted skipped months.
+
+==================================================
+10. RESOLVE STATISTICAL INCONSISTENCIES
+==================================================
+
+The previous report mentioned:
+- 1,875 monthly recurrence series in the cadence breakdown
+but also:
+- "1,852 monthly series" in the stable-amount statistic.
+
+Determine why these numbers differ.
+
+If they come from different populations or filters, document the exact distinction.
+
+If it is an accidental inconsistency, fix it.
+
+All reported statistics must come from one reproducible smoke-test run.
+
+==================================================
+11. TESTS
+==================================================
+
+Expand the recurrence test suite to cover all newly hardened behavior.
+
+At minimum:
+
+1. valid consecutive monthly recurrence
+2. skipped-month same-day false positive rejected
+3. month-end calendar recurrence
+4. irregular monthly rejected
+5. genuine explicit future duplicate suppressed
+6. unrelated same-category future event does not suppress
+7. pending event does not incorrectly suppress
+8. deterministic duplicate matching
+9. varying description handling
+10. unrelated message cannot cancel recurrence
+11. unrelated message cannot amend recurrence
+12. cancellation affects future only
+13. amendment affects future only
+14. no future events outside bounds
+15. no duplicate series/date occurrence
+16. unresolved event cannot establish recurrence
+17. pending credit cannot establish income
+18. speculative income cannot establish recurrence
+
+Run:
+
+python -m unittest discover -s code/tests
+
+Then run the full real-data recurrence smoke test.
+
+==================================================
+12. NO DOWNSTREAM LOGIC
+==================================================
+
+Do NOT start implementing the simulator after the audit.
+
+The next layer will consume your recurrence output.
+
+push the changes to github repo with suitable commit message
+Therefore finish this turn with:
+
+A. files changed
+B. exact recurrence algorithm
+C. exact monthly rule
+D. exact duplicate matching rule
+E. pending-event treatment
+F. series grouping rule
+G. amount forecasting rule
+H. cancellation/amendment rule
+I. test results
+J. complete real-data statistics
+K. before/after changes
+L. representative corrected examples
+M. any remaining known limitations
+
+Update log.txt according to AGENTS.md.
+
+Do not implement anything beyond recurrence hardening and its tests.
+
+Agent Response Summary:
+Audited and hardened the recurrence detection and future expansion engine in code/recurrence.py. Fixed monthly cadence detection to strictly enforce consecutive calendar months, eliminating 12 false-positive skipped-month series (9 sporadic freelance/commission series and 3 irregular expenses). Hardened duplicate suppression with semantic obligation matching and restricted suppression strictly to genuine explicit scheduled future obligations (eliminating 3 incorrect suppressions from generic pending debits). Expanded unit test suite to 18 specific tests covering all Section 11 requirements (61 total unit tests passing). All real-dataset statistics verified via smoke_test_recurrence.py from a single unified run.
+
+Actions:
+* updated code/recurrence.py (_is_consecutive_monthly, _is_genuine_duplicate, expand_future_events)
+* rewritten code/tests/test_recurrence.py with 18 comprehensive regression and invariant unit tests
+* updated code/tests/smoke_test_recurrence.py to provide audit diagnostics, breakdown of suppressions, and tracking of skipped-month rejections
+* ran full test suite (61 tests passed, 0 failed) and smoke test suite
+* updated log.txt with turn summary
+
+Context:
+tool=Antigravity
+branch=master
+repo_root=c:\Users\Lenovo\Downloads\buy-or-wait\hackerrank-orchestrate-september26
+worktree=main
+parent_agent=none
+
+## [2026-09-12T23:38:30+05:30] Deterministic 90-Day Cash-Flow Simulator Implementation
+
+User Prompt (verbatim, secrets redacted):
+We are now moving to the SINGLE deterministic 90-day cash-flow simulator.
+
+The following layers are considered established and should be treated as upstream inputs:
+
+raw dataset
+→ normalized typed data
+→ canonical/reconciled ledger
+→ image evidence resolution
+→ recurrence detection
+→ future recurring-event expansion
+
+Do NOT implement yet:
+- amount_safe_to_pay
+- affordability classification
+- payment-plan optimizer
+- spending-change optimizer
+- final decision ranking
+- LLM explanation
+- output.csv generation
+
+This turn is ONLY the deterministic financial state + 90-day simulation engine.
+
+==================================================
+1. FIRST READ EXISTING IMPLEMENTATION
+==================================================
+
+Before coding:
+
+- inspect models.py
+- inspect canonical.py
+- inspect reconciliation.py
+- inspect recurrence.py
+- inspect all tests
+- inspect AGENTS.md
+- inspect the real dataset structure
+- inspect the existing recurrence output representation
+
+Do not duplicate upstream logic unnecessarily.
+
+The simulator must consume the canonical ledger + future recurrence events rather than reimplementing recurrence detection.
+
+==================================================
+2. CORE DESIGN
+==================================================
+
+Implement ONE reusable simulator.
+
+Conceptually:
+
+simulate_user(
+    user_id,
+    simulation_start,
+    simulation_end,
+    initial_state,
+    canonical_events,
+    future_events,
+    profile
+) -> SimulationResult
+
+Do NOT create separate competing simulation implementations for different decision paths.
+
+The same simulator must later be reusable by:
+- baseline affordability
+- safe-to-pay calculation
+- partial payment evaluation
+- installment evaluation
+- spending-change evaluation
+
+The only thing that should vary later is the candidate decision/action being simulated.
+
+==================================================
+3. FINANCIAL STATE
+==================================================
+
+Define an immutable/strongly typed financial state.
+
+At minimum represent:
+
+- user_id
+- date
+- available cash / projected balance
+- reserved amount from pending debits
+- cumulative inflows
+- cumulative outflows
+- known scheduled obligations
+- safety-floor status
+- event trace / lineage
+
+Use Decimal exclusively for money.
+
+NO float.
+
+NO binary floating-point arithmetic.
+
+==================================================
+4. INITIAL BALANCE
+==================================================
+
+Determine exactly how the starting financial state is constructed from existing data.
+
+Inspect the existing canonical/reconciliation semantics.
+
+Do NOT invent income or starting cash.
+
+The simulator must use only financially supported information from the dataset.
+
+Document:
+
+- balance anchor date
+- starting balance
+- treatment of settled events before the anchor
+- treatment of pending debits
+- treatment of pending credits
+- treatment of scheduled events
+- treatment of unresolved events
+- treatment of failed/cancelled events
+
+If the dataset contains an explicit current/available balance, use the authoritative value according to the dataset semantics.
+
+If no explicit balance exists, derive it deterministically from supported historical information and clearly document the anchor.
+
+Do NOT silently choose an arbitrary date or fabricate a balance.
+
+==================================================
+5. EVENT SEMANTICS
+==================================================
+
+Implement explicit deterministic cash semantics.
+
+Settled debit:
+- decreases projected cash
+
+Settled credit:
+- increases projected cash
+
+Scheduled future debit:
+- decreases projected cash on effective date
+- represents a known obligation
+
+Scheduled future credit:
+- increases projected cash ONLY if it is explicitly confirmed/authoritative according to upstream semantics
+
+Pending debit:
+- reserve/hold treatment must follow the established reconciliation semantics
+- do not double-count it when it later becomes a settled event
+
+Pending credit:
+- contributes zero projected cash
+- must never be treated as future income
+
+Failed/cancelled:
+- no cash impact
+
+Unresolved:
+- no numerical cash impact
+
+Non-cash:
+- no cash impact
+
+Do not infer cash impact from description alone.
+
+==================================================
+6. NO DOUBLE COUNTING
+==================================================
+
+This is critical.
+
+A single real-world transaction must never affect the simulated balance twice.
+
+Examples:
+
+pending debit
+→ later settled debit
+
+must not become:
+
+pending reserve + settled debit + another duplicate debit.
+
+Similarly:
+
+scheduled event
+→ later canonical settled event
+
+must not be counted twice if both represent the same obligation.
+
+Use upstream event identity / lineage / status semantics wherever available.
+
+Add explicit tests.
+
+==================================================
+7. EVENT ORDERING
+==================================================
+
+Define deterministic event ordering for same-day events.
+
+Do not rely on filesystem order, CSV order, dictionary iteration, or Python hash ordering.
+
+Use a stable ordering such as:
+
+effective_date
+→ event priority/status
+→ event_id
+
+Document the exact priority.
+
+The result must be identical across repeated runs.
+
+==================================================
+8. PENDING DEBIT RESERVATION
+==================================================
+
+Model pending debits carefully.
+
+The simulator should distinguish:
+
+- ledger/projected balance
+- reserved pending amount
+- available cash after reservation
+
+Do NOT subtract a pending debit twice.
+
+Define:
+
+projected_balance
+reserved_pending
+available_cash
+
+or an equally rigorous representation.
+
+Document which quantity downstream safety calculations should use.
+
+The future simulator must make it impossible to accidentally treat the same pending debit as both:
+1. already deducted from balance
+2. still reserved
+
+==================================================
+9. FUTURE EVENTS
+==================================================
+
+Consume the recurrence layer's FutureEvent stream.
+
+Also consume explicit scheduled canonical events.
+
+Do not independently regenerate recurrence here.
+
+Future event stream must include:
+
+- one-time explicit scheduled events
+- recurring forecast events
+- explicit events that suppressed forecast duplicates
+
+Only authoritative explicit events and validated forecasts enter the projected cash timeline.
+
+No speculative events.
+
+==================================================
+10. SIMULATION WINDOW
+==================================================
+
+The simulator must accept arbitrary:
+
+simulation_start
+simulation_end
+
+Do NOT hardcode 90 days internally.
+
+The caller will use a 90-day horizon later.
+
+Respect exact inclusive/exclusive boundary semantics and document them.
+
+Test:
+
+- event exactly on start date
+- event exactly on end date
+- event one day before
+- event one day after
+
+==================================================
+11. DAILY VS EVENT-DRIVEN MODEL
+==================================================
+
+Choose the safest deterministic architecture.
+
+An event-driven implementation is acceptable, but the resulting state must support daily balance/safety inspection.
+
+The simulator should make it possible to determine:
+
+- balance immediately before each event
+- balance immediately after each event
+- minimum projected available cash over the horizon
+- date of minimum projected available cash
+- all obligation breaches
+- all safety-floor breaches
+
+If using daily snapshots, generate them deterministically.
+
+Do not use Monte Carlo, randomness, sampling, LLM reasoning, or current-date-dependent behavior.
+
+==================================================
+12. SAFETY FLOOR
+==================================================
+
+Inspect the profile/dataset to determine the intended minimum cash/safety-floor semantics.
+
+Do not invent a universal arbitrary value if the dataset provides user-specific information.
+
+Represent:
+
+- safety floor amount
+- whether the floor is profile-defined
+- projected available cash
+- whether/when the floor is breached
+
+The simulator should expose safety-floor breaches to downstream logic.
+
+Do NOT yet decide affordability.
+
+==================================================
+13. SPENDING FLEXIBILITY
+==================================================
+
+The simulator must preserve enough event metadata for future optimization.
+
+For each projected expense, preserve:
+
+- category
+- description
+- flexibility
+- minimum allowed amount
+- protected status
+- source event/series
+- whether historical, explicit future, or forecast
+- recurrence series ID where applicable
+
+Do not optimize these expenses in this turn.
+
+==================================================
+14. INCOME RELIABILITY
+==================================================
+
+Preserve source/status information so downstream logic can distinguish:
+
+- settled income
+- explicit confirmed future income
+- forecast recurring income
+- pending/unconfirmed income
+
+The simulator itself should not convert unreliable income into reliable cash.
+
+==================================================
+15. SIMULATION RESULT
+==================================================
+
+Create a strongly typed result containing enough information for later layers.
+
+At minimum:
+
+SimulationResult:
+- user_id
+- start_date
+- end_date
+- initial_state
+- ending_state
+- minimum_projected_available_cash
+- minimum_cash_date
+- total_inflows
+- total_outflows
+- projected_events
+- daily snapshots or equivalent trace
+- safety_floor
+- safety_floor_breaches
+- event trace / provenance
+
+Make structures immutable where practical.
+
+==================================================
+16. METAMORPHIC / INVARIANT TESTS
+==================================================
+
+Add strong tests.
+
+At minimum:
+
+A. Determinism
+Same input twice => byte-for-byte/equivalent identical result.
+
+B. Zero-event invariance
+No events => balance remains unchanged.
+
+C. Conservation
+Ending balance equals initial balance + inflows - outflows, adjusted only for explicitly separated reservation semantics.
+
+D. Order invariance
+Reordering input events does not change result.
+
+E. Boundary
+Events outside simulation range do not affect the simulation.
+
+F. Pending debit
+Pending debit reserves once and is never double-counted.
+
+G. Pending credit
+Pending credit contributes zero cash.
+
+H. Failed/cancelled
+No cash impact.
+
+I. Unresolved
+No cash impact.
+
+J. Explicit scheduled event
+Appears exactly once.
+
+K. Forecast event
+Appears exactly once unless explicitly suppressed upstream.
+
+L. Duplicate lineage
+Same real-world event represented by multiple statuses cannot double-count.
+
+M. Safety floor
+Breach detection is deterministic.
+
+N. Decimal
+All money operations remain Decimal.
+
+O. Same-day ordering
+Changing input order does not change the same-day result.
+
+P. Arbitrary window
+Simulation works for windows other than 90 days.
+
+==================================================
+17. REAL DATA VALIDATION
+==================================================
+
+Run the simulator across all 250 evaluation requests using the actual dataset.
+
+Report:
+
+- requests successfully simulated
+- failures
+- users represented
+- simulation start/end policy
+- total projected events
+- explicit future events
+- forecast future events
+- settled events included
+- pending debits
+- pending credits
+- safety-floor breaches
+- users with negative projected cash
+- minimum projected cash distribution/summary
+- ending balance summary
+
+Do NOT interpret these as affordability decisions yet.
+
+Do not generate output.csv.
+
+==================================================
+18. SANITY CHECKS
+==================================================
+
+Run targeted manual inspections for several users.
+
+For each selected user show a compact timeline such as:
+
+date | event | direction | amount | status/source | balance before | balance after | reserved | available
+
+Include at least:
+- one user with recurring salary + expenses
+- one with pending debit
+- one with scheduled future event
+- one with cancelled recurrence
+- one with amended recurrence
+- one with no recurring income
+
+Verify every transition manually.
+
+==================================================
+19. PERFORMANCE
+==================================================
+
+Avoid O(users × all events × all requests) scans where a simple indexed approach is possible.
+
+Reuse the Dataset indexes / canonical indexes / recurrence indexes already built.
+
+The 250-request full run should be practical on the local machine.
+
+Do not introduce unnecessary dependencies.
+
+==================================================
+20. LOGGING
+==================================================
+
+Update log.txt according to AGENTS.md.
+
+Do not modify organizer files.
+
+==================================================
+21. FINAL RESPONSE
+==================================================
+
+Report:
+
+A. Files created/modified
+B. Financial state model
+C. Initial balance derivation
+D. Exact event cash semantics
+E. Pending debit reservation model
+F. Double-count prevention
+G. Same-day event ordering
+H. Simulation boundary semantics
+I. Safety-floor representation
+J. Simulation result structure
+K. Tests and results
+L. Real-data statistics
+M. Representative timelines
+N. Performance
+O. Known limitations
+
+STOP after the simulator.
+
+Do not implement:
+amount_safe_to_pay,
+affordability,
+payment plans,
+spending changes,
+decision ranking,
+LLM explanation,
+or output.csv.
+
+Agent Response Summary:
+Implemented the single, unified deterministic cash-flow simulator in code/simulator.py and integrated it into the package. Designed immutable FinancialState, EventTransition, DailySnapshot, SafetyFloorBreach, and SimulationResult dataclasses with exclusive Decimal monetary precision. Established rigorous pending debit reservation mechanics that distinguish ledger projected balance, active reservations, and available cash, preventing any double deduction across pending/settled lineages. Formulated deterministic same-day event ordering (Inflows -> Holds -> Outflows -> Non-cash -> event_id) and strict inclusive boundary checking. Implemented comprehensive test suite test_simulator.py validating all 16 metamorphic/invariant properties (77 total tests passing). Executed smoke_test_simulator.py across all 250 evaluation requests in 7.5s (0 failures), gathering aggregate metrics and auditing 6 representative user archetypes.
+
+Actions:
+* created code/simulator.py with simulate_user, create_initial_state, and state/result data models
+* updated code/__init__.py exporting simulator classes and functions
+* created code/tests/test_simulator.py covering all 16 metamorphic/invariant tests (A through P)
+* created code/tests/smoke_test_simulator.py validating 250 evaluation requests and printing 6 archetype audits
+* verified full unit test suite (77 tests passed, 0 failed in 0.022s)
+* updated log.txt with turn summary
+
+Context:
+tool=Antigravity
+branch=master
+repo_root=c:\Users\Lenovo\Downloads\buy-or-wait\hackerrank-orchestrate-september26
+worktree=main
+parent_agent=none
+
+## [2026-09-12T23:50:00+05:30] Deterministic Safe-to-Pay and Earliest Full Payment Layer Implementation
+
+User Prompt (verbatim, secrets redacted):
+We are now implementing the deterministic safe-to-pay layer.
+
+The following upstream layers are established and MUST be reused:
+
+raw dataset
+→ normalized typed data
+→ canonical/reconciled ledger
+→ image evidence resolution
+→ recurrence detection
+→ future-event expansion
+→ single deterministic financial simulator
+
+Do NOT implement yet:
+- affordability_status
+- recommended_payment_method
+- payment_plan
+- spending_changes_needed
+- decision ranking
+- LLM explanation
+- output.csv
+
+This turn is ONLY:
+
+1. amount_safe_to_pay
+2. earliest_date_for_full_payment
+
+Both must be deterministic, auditable, simulator-backed, and conservative.
+
+==================================================
+1. FIRST INSPECT EVERYTHING
+==================================================
+
+Before coding inspect:
+
+- AGENTS.md
+- problem_statement.md
+- models.py
+- canonical.py
+- reconciliation.py
+- recurrence.py
+- simulator.py
+- all tests
+- dataset/requests.csv
+- financial_profiles.csv
+- payment_options.csv
+- existing plan
+
+Pay particular attention to the exact problem definition for:
+- safe amount
+- affordability
+- safety floor
+- requested amount
+- request date
+- partial payment semantics
+- earliest full-payment date
+
+Do not invent semantics that conflict with the problem statement or dataset.
+
+==================================================
+2. CORE PRINCIPLE
+==================================================
+
+The LLM MUST NOT determine amount_safe_to_pay.
+
+The amount must be produced entirely by deterministic Python.
+
+Use the existing single simulator.
+
+Conceptually:
+
+baseline_simulation =
+    simulate_user(...)
+
+Then evaluate today's purchase against that same financial model.
+
+Do NOT create a second cash-flow engine.
+
+==================================================
+3. DEFINE THE SAFETY CONDITION
+==================================================
+
+Establish an explicit mathematical definition.
+
+For paying X today:
+
+X is safe iff, after applying the purchase:
+
+- available cash does not violate the user's safety floor at any point in the simulation horizon
+- known/forecast obligations remain fundable according to the established financial model
+- no prohibited overdraft condition occurs
+
+Use the exact safety semantics supported by the problem statement/profile.
+
+Do not simply check:
+
+current_balance - X >= safety_floor
+
+because future obligations matter.
+
+The decision must consider the entire forecast horizon.
+
+==================================================
+4. AMOUNT_SAFE_TO_PAY
+==================================================
+
+Implement:
+
+calculate_amount_safe_to_pay(request, baseline_simulation, ...)
+
+The result MUST satisfy:
+
+0 <= amount_safe_to_pay <= requested_amount
+
+Use Decimal only.
+
+No float.
+
+No LLM.
+
+No randomness.
+
+No arbitrary percentage such as "keep 20%".
+
+The amount must be the maximum safe amount under the deterministic simulation.
+
+Formally, if S(X) means "paying X today remains safe across the required horizon":
+
+amount_safe_to_pay =
+    max X ∈ [0, requested_amount] such that S(X) is true.
+
+==================================================
+5. MONOTONICITY
+==================================================
+
+Verify that safety is monotonic:
+
+If paying X is safe, every Y <= X must also be safe.
+
+This property is essential because it allows a deterministic binary search over Decimal values.
+
+However, DO NOT assume monotonicity blindly.
+
+First reason about the simulator and candidate purchase event.
+
+Add an explicit monotonicity test.
+
+If the simulator structure introduces a non-monotonic behavior, identify it and fix the underlying model rather than hiding the problem.
+
+==================================================
+6. EXACT MONEY PRECISION
+==================================================
+
+Use Decimal throughout.
+
+Determine the dataset's monetary precision rules.
+
+Do NOT use binary float for:
+- binary search
+- comparison
+- subtraction
+- rounding
+- conversion
+
+Define the smallest meaningful currency increment.
+
+For normal two-decimal currencies this may be Decimal("0.01"), but do NOT blindly assume all currencies have two decimals.
+
+Inspect the dataset and existing parser/model conventions.
+
+The final amount must be representable in the user's currency precision.
+
+==================================================
+7. SAFE-PAYMENT CANDIDATE EVENT
+==================================================
+
+Represent today's purchase as a deterministic candidate event.
+
+It must have:
+
+- request_id
+- user_id
+- request_date
+- requested amount
+- candidate amount
+- outflow direction
+- appropriate category/source metadata
+- deterministic candidate event ID
+- provenance indicating this is the hypothetical purchase being evaluated
+
+Do NOT mutate the canonical ledger.
+
+Do NOT insert the candidate permanently into the dataset.
+
+The candidate exists only inside simulation/evaluation.
+
+==================================================
+8. CURRENT-DAY SEMANTICS
+==================================================
+
+The purchase occurs on the request date.
+
+Respect the simulator's established same-day ordering.
+
+Determine exactly where the candidate purchase sits relative to:
+
+- confirmed income arriving that day
+- pending holds
+- scheduled obligations
+- other same-day events
+
+Use the safest interpretation supported by the problem statement.
+
+Document this explicitly.
+
+Do not accidentally allow the purchase to benefit from money that should arrive later that day if the problem semantics do not permit that.
+
+==================================================
+9. FUTURE OBLIGATION PRESERVATION
+==================================================
+
+When evaluating candidate amount X:
+
+The candidate purchase must not remove, modify, postpone, or otherwise alter:
+
+- rent
+- utilities
+- debt repayments
+- subscriptions
+- recurring expenses
+- confirmed income
+- explicit scheduled obligations
+- pending reservations
+
+unless a later explicitly designed spending-change/payment-plan layer says so.
+
+This turn is pure "pay X today" evaluation.
+
+==================================================
+10. BINARY SEARCH / MAXIMUM SAFE AMOUNT
+==================================================
+
+Implement an exact deterministic search.
+
+Preferred approach:
+
+1. Check X = 0.
+2. Check requested_amount.
+3. If requested amount is safe:
+   amount_safe_to_pay = requested_amount.
+4. Otherwise find the maximum safe monetary increment.
+
+Use Decimal arithmetic.
+
+Do not use an arbitrary iteration count without proving the result is exact.
+
+For a currency with minimum increment q:
+
+search over integer units:
+
+0 ... requested_amount / q
+
+or an equivalent exact discrete method.
+
+The final answer must be the largest representable currency amount satisfying the safety condition.
+
+Add tests where the safe amount is:
+- zero
+- exactly the requested amount
+- less than requested
+- exactly on the safety-floor boundary
+- one currency unit above the boundary
+
+==================================================
+11. EARLIEST DATE FOR FULL PAYMENT
+==================================================
+
+Implement:
+
+calculate_earliest_full_payment_date(...)
+
+Question:
+
+"What is the earliest date on which paying the FULL requested amount can safely occur?"
+
+Evaluate candidate dates across the simulation horizon.
+
+For each candidate date:
+
+- inject the full requested amount as a hypothetical purchase on that date
+- run the SAME simulator
+- test the same safety condition
+- preserve all existing obligations
+- do not alter recurring events
+- do not invent future income
+
+Return the earliest date satisfying the condition.
+
+If full payment is already safe today:
+
+earliest_date_for_full_payment = request_date
+
+If it becomes safe later:
+
+return the earliest safe date.
+
+If it never becomes safe inside the permitted horizon:
+
+return the exact null/empty representation required by the problem schema.
+
+Do NOT invent a date beyond the simulation horizon.
+
+==================================================
+12. DATE SEARCH
+==================================================
+
+Do not simply search every calendar day with an independent custom balance algorithm.
+
+Reuse the simulator.
+
+You may optimize by identifying dates where the projected available cash changes, but correctness comes first.
+
+The answer must be exactly reproducible.
+
+Test:
+
+- safe today
+- safe immediately after salary
+- safe after a scheduled obligation clears
+- never safe within horizon
+- boundary date
+- date with same-day income/outflow
+
+==================================================
+13. SAFETY FLOOR BOUNDARY
+==================================================
+
+Be precise about:
+
+available_cash >= safety_floor
+
+versus
+
+available_cash > safety_floor
+
+Use the problem statement's exact semantics.
+
+A candidate that leaves available cash exactly equal to the safety floor must be classified according to that rule.
+
+Add an explicit regression test.
+
+==================================================
+14. NEGATIVE CASH / OVERDRAFT
+==================================================
+
+A candidate purchase must never be considered safe if it causes an overdraft or violates any explicit liquidity constraint.
+
+Do not confuse:
+- safety-floor breach
+with
+- negative cash.
+
+Represent both correctly.
+
+==================================================
+15. PENDING DEBITS
+==================================================
+
+The baseline simulator already reserves pending debits.
+
+When evaluating today's purchase:
+
+- preserve those reservations
+- do not double-count them
+- do not release them merely because we are evaluating a purchase
+- use available_cash as the downstream safety quantity
+
+Add a test where a pending debit changes amount_safe_to_pay.
+
+==================================================
+16. FUTURE INCOME
+==================================================
+
+Use the simulator's established income semantics.
+
+Recurring forecast salary may be included only because recurrence has already established it deterministically.
+
+Do NOT introduce:
+- bonuses
+- speculative commissions
+- pending credits
+- unconfirmed refunds
+- investment gains
+- prize money
+
+during safe-to-pay evaluation.
+
+==================================================
+17. NO SPENDING OPTIMIZATION YET
+==================================================
+
+This calculation must assume:
+
+- no discretionary spending is removed
+- no subscription is cancelled
+- no dining is reduced
+- no payment is delayed
+- no installment plan is created
+
+Those are separate later decision layers.
+
+Therefore amount_safe_to_pay represents the maximum amount safe TODAY under the baseline cash-flow trajectory.
+
+==================================================
+18. CERTIFICATE / AUDIT TRAIL
+==================================================
+
+Create a deterministic internal certificate for the result.
+
+At minimum preserve:
+
+- request_id
+- requested_amount
+- amount_safe_to_pay
+- limiting date
+- available cash immediately after purchase
+- minimum projected available cash after purchase
+- safety floor
+- safety-floor margin
+- earliest full-payment date
+- reason if full amount is unsafe
+- simulation horizon
+- candidate search method
+
+This certificate is internal/audit data.
+
+Do not add it to output.csv yet.
+
+==================================================
+19. TESTS
+==================================================
+
+Add comprehensive tests.
+
+At minimum:
+
+1. zero safe amount
+2. full requested amount safe
+3. partial safe amount
+4. maximum safe amount is exact
+5. amount never exceeds request
+6. amount never negative
+7. monotonicity
+8. safety-floor equality boundary
+9. one-unit-above boundary
+10. future obligation limits safe amount
+11. pending debit limits safe amount
+12. future salary can increase safe amount
+13. pending credit cannot increase safe amount
+14. speculative bonus cannot increase safe amount
+15. candidate does not mutate canonical ledger
+16. deterministic repeated calculation
+17. input event order invariance
+18. Decimal precision
+19. earliest date = request date when safe today
+20. earliest date after future income
+21. never safe within horizon
+22. exact horizon boundary
+23. same-day event ordering
+24. candidate full purchase evaluated through same simulator
+25. no spending optimization leaks into baseline safe amount
+
+Also run:
+
+python -m unittest discover -s code/tests
+
+==================================================
+20. METAMORPHIC TESTS
+==================================================
+
+Add at least these properties:
+
+A. If requested amount increases while all else is identical, amount_safe_to_pay cannot increase.
+
+B. If current available cash increases by Δ with all else identical, safe amount should not decrease.
+
+C. If a future mandatory outflow increases by Δ, safe amount should not increase.
+
+D. If a confirmed future income increases by Δ, safe amount should not decrease.
+
+E. Adding an unrelated non-cash event must not change the answer.
+
+F. Reordering source events must not change the answer.
+
+G. Running the same calculation twice produces identical output.
+
+==================================================
+21. REAL-DATA RUN
+==================================================
+
+Run across all 250 evaluation requests.
+
+Report:
+
+- requests evaluated
+- failures
+- amount_safe_to_pay = 0
+- amount_safe_to_pay = requested amount
+- partial-safe cases
+- total requested amount
+- total safe amount
+- median safe/request ratio
+- minimum ratio
+- maximum ratio
+- requests with full payment safe today
+- requests requiring later full payment
+- requests never safely payable within horizon
+- earliest-date distribution/summary
+
+DO NOT generate output.csv yet.
+
+==================================================
+22. REPRESENTATIVE AUDITS
+==================================================
+
+Inspect at least 8 real requests representing:
+
+1. comfortably affordable
+2. exactly near safety floor
+3. future salary required
+4. large purchase relative to cash
+5. pending debit
+6. no recurring income
+7. negative projected baseline
+8. full payment never safe within horizon
+
+For each show:
+
+request
+requested amount
+current available cash
+safety floor
+amount_safe_to_pay
+safe ratio
+limiting date
+minimum available cash after candidate
+earliest full-payment date
+reason
+
+==================================================
+23. PERFORMANCE
+==================================================
+
+Avoid unnecessary repeated full-dataset scans.
+
+Reuse indexes and baseline simulation data where safe.
+
+Correctness is more important than micro-optimization.
+
+Report runtime for all 250 requests.
+
+==================================================
+24. LOGGING
+==================================================
+
+Update log.txt according to AGENTS.md.
+
+Do not modify organizer files.
+
+push the changes to the github repo 
+==================================================
+25. FINAL RESPONSE
+==================================================
+
+Report:
+
+A. Files created/modified
+B. Exact mathematical safety definition
+C. Candidate purchase semantics
+D. Search algorithm
+E. Currency precision rule
+F. Earliest-date algorithm
+G. Safety-floor boundary
+H. Pending-debit treatment
+I. Future-income treatment
+J. Audit certificate
+K. Tests
+L. Metamorphic tests
+M. Full real-data statistics
+N. Representative real requests
+O. Runtime
+P. Known limitations
+
+STOP.
+
+Do NOT implement:
+- affordability_status
+- recommended_payment_method
+- payment_plan
+- spending_changes_needed
+- ranking
+- LLM explanation
+- output.csv
+
+Agent Response Summary:
+Implemented the deterministic safe-to-pay and earliest full payment date evaluation layer in code/safe_to_pay.py. Grounded all calculations strictly in the established single deterministic simulator without creating a competing cash-flow engine. Defined exact mathematical safety conditions requiring available_cash >= safety_floor and >= 0 across the entire 90-day simulation window. Designed discrete search over currency quantums (cents/sen/paise) with binary search verification and suffix pruning for earliest full payment date search. Created 32 unit tests in test_safe_to_pay.py covering all 25 scenario tests and 7 metamorphic invariance properties (109 total repository unit tests passing). Executed full evaluation across all 250 evaluation requests in 10.8s (0 failures), gathering aggregate metrics and auditing 8 representative archetypes.
+
+Actions:
+* created code/safe_to_pay.py implementing calculate_amount_safe_to_pay, calculate_earliest_full_payment_date, evaluate_request_safe_to_pay, and SafeToPayCertificate
+* updated code/__init__.py exporting safe-to-pay functions and models
+* created code/tests/test_safe_to_pay.py covering 25 scenarios and 7 metamorphic invariance properties
+* created code/tests/smoke_test_safe_to_pay.py validating all 250 requests and auditing 8 archetypes
+* verified full test suite (109 passed, 0 failed in 0.058s)
+* updated log.txt with turn summary
+
+## [2026-09-13T00:02:00+05:30] Safe-to-Pay Mathematical Audit and Hardening Pass
+
+User Prompt (verbatim, secrets redacted):
+We are NOT moving to affordability/payment-method logic yet.
+
+Perform a focused mathematical audit and hardening pass on the safe-to-pay layer.
+
+The current implementation passed the requested tests and real-data smoke test, but before downstream decision logic consumes these values we need to formally validate three areas:
+
+1. currency quantum
+2. maximum-safe-amount headroom shortcut
+3. earliest-date pruning correctness
+
+Do NOT implement:
+- affordability_status
+- recommended_payment_method
+- payment_plan
+- spending_changes_needed
+- decision ranking
+- LLM explanation
+- output.csv
+
+Do NOT rewrite the entire safe-to-pay engine.
+Make only changes necessary to establish correctness.
+
+Agent Response Summary:
+Performed comprehensive mathematical audit and hardening pass on safe-to-pay layer in code/safe_to_pay.py. Proved universal 0.01 currency quantum compatibility across all five currencies (USD, EUR, ZAR, INR, IDR) from raw dataset tables. Mathematically proved and validated the headroom translation invariant: post-candidate cash shifts linearly by -(Y - X) for any candidate purchase amounts Y > X. Formally proved earliest-date pruning safety against 91-day exhaustive simulation: no genuinely safe date can be pruned because candidate outflow translates all subsequent lowest cash states downward by requested_amount. Added 39 new mathematical audit unit tests in test_safe_to_pay.py (now 148 total unit tests passing in 0.554s). Executed real-data validation and cross-checks across all 250 requests: 0 quantum violations, 50/50 matched earliest dates against brute-force 91-day search (0 mismatches), 13/13 matched discrete amounts against brute-force search (0 mismatches), 0 monotonicity violations, and exact 0 drift from pre-hardening baseline distributions.
+
+Actions:
+* audited all monetary fields across dataset files, proving Decimal("0.01") is the exact minimal payment increment
+* added formal invariant checks and assertions in code/safe_to_pay.py
+* refactored earliest full payment date pruning to eliminate redundancy and short-circuit on pre-existing baseline breaches
+* anchored SafeToPayCertificate limiting_date to the candidate post-purchase simulation result
+* added extensive test classes in code/tests/test_safe_to_pay.py covering currency quantum, translation invariant, exhaustive cross-checks, monotonicity prefix, earliest-date exhaustive comparison, same-day priorities, event isolation, and certificate audits
+* updated code/tests/smoke_test_safe_to_pay.py with exhaustive cross-checks, monotonicity validation, and regression comparisons
+* verified 148 unit tests passing cleanly in 0.554s
+* committed and pushed changes to origin master
+
+Context:
+tool=Antigravity
+branch=master
+repo_root=c:\Users\Lenovo\Downloads\buy-or-wait\hackerrank-orchestrate-september26
+worktree=main
+parent_agent=none
+
+

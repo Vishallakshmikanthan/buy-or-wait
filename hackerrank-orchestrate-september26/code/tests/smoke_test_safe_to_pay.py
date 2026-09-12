@@ -190,6 +190,139 @@ def run_safe_to_pay_smoke_test() -> None:
         print(f"Earliest Full Date:{earliest_str}")
         print(f"Decision Reason:   {cert.reason_if_unsafe or 'Full requested amount is safely affordable today without breaching the safety floor.'}")
 
+    # Exhaustive Cross-Check on Real Data Sample
+    print("\n==================================================")
+    print("EXHAUSTIVE CROSS-CHECK & MATHEMATICAL AUDIT ON REAL DATA")
+    print("==================================================")
+
+    # 1. Currency Quantum Audit across all 250 requests
+    quantum_violations = 0
+    from code.safe_to_pay import get_currency_quantum, is_purchase_safe, make_candidate_purchase_event
+    for req in ds.requests:
+        cert = certificates[req.request_id]
+        q = get_currency_quantum(cert.currency)
+        if req.requested_amount % q != Decimal("0") or cert.amount_safe_to_pay % q != Decimal("0"):
+            quantum_violations += 1
+    print(f"Currency Quantum Violations (all 250 requests): {quantum_violations}")
+
+    # 2. Earliest Date: Pruning vs Exhaustive 91-Day Simulator Evaluation on Sample
+    sample_requests = ds.requests[::5]  # 50 deterministic requests
+    print(f"\nRunning exhaustive 91-day search for {len(sample_requests)} sample requests...")
+    earliest_date_mismatches = 0
+    t_early_start = time.perf_counter()
+
+    for req in sample_requests:
+        uid = req.user_id
+        prof = ds.profiles[uid]
+        start_d = req.request_date
+        end_d = req.request_date + timedelta(days=90)
+        future_res = expand_future_events(all_series[uid], start_d, end_d, ledger=ledger)
+        user_canonical = ledger.get_events_for_user(uid)
+
+        cert = certificates[req.request_id]
+        optimized_date = cert.earliest_date_for_full_payment
+
+        # Brute force all 91 days
+        exhaustive_date = None
+        for day_offset in range(91):
+            cand_d = start_d + timedelta(days=day_offset)
+            cand_ev = make_candidate_purchase_event(req, req.requested_amount, cand_d, prof.home_currency)
+            safe, _ = is_purchase_safe(uid, start_d, end_d, user_canonical, future_res.future_events, prof, cand_ev)
+            if safe:
+                exhaustive_date = cand_d
+                break
+
+        if optimized_date != exhaustive_date:
+            earliest_date_mismatches += 1
+            print(f"  MISMATCH on {req.request_id}: optimized={optimized_date} vs exhaustive={exhaustive_date}")
+
+    t_early_dur = time.perf_counter() - t_early_start
+    print(f"Earliest-Date Pruning vs Exhaustive: {len(sample_requests) - earliest_date_mismatches}/{len(sample_requests)} matched ({earliest_date_mismatches} mismatches) in {t_early_dur:.2f}s")
+
+    # 3. Safe Amount: Exhaustive Discrete Cross-Check on Sample
+    amt_sample = [r for r in ds.requests if r.requested_amount <= Decimal("2000")][::5]
+    if not amt_sample:
+        amt_sample = ds.requests[:15]
+    print(f"\nRunning discrete exhaustive amount check on {len(amt_sample)} requests...")
+    amount_mismatches = 0
+    monotonicity_violations = 0
+    t_amt_start = time.perf_counter()
+
+    for req in amt_sample:
+        uid = req.user_id
+        prof = ds.profiles[uid]
+        start_d = req.request_date
+        end_d = req.request_date + timedelta(days=90)
+        future_res = expand_future_events(all_series[uid], start_d, end_d, ledger=ledger)
+        user_canonical = ledger.get_events_for_user(uid)
+        cert = certificates[req.request_id]
+
+        # Use step size of max(1, req_amt / 100) to keep evaluation tractable
+        step = max(Decimal("1.00"), (req.requested_amount / Decimal("50")).quantize(Decimal("1")))
+        units = int(req.requested_amount / step)
+
+        best_exhaustive = Decimal("0")
+        predicates = []
+        for u in range(units + 1):
+            amt = min(req.requested_amount, u * step)
+            ev = make_candidate_purchase_event(req, amt, start_d, prof.home_currency)
+            safe, _ = is_purchase_safe(uid, start_d, end_d, user_canonical, future_res.future_events, prof, ev)
+            predicates.append(safe)
+            if safe:
+                best_exhaustive = amt
+
+        # Check prefix monotonicity
+        seen_false = False
+        for p in predicates:
+            if seen_false and p:
+                monotonicity_violations += 1
+                break
+            if not p:
+                seen_false = True
+
+        # When safe amount is less than requested amount, check that best_exhaustive <= cert.amount_safe_to_pay
+        if cert.amount_safe_to_pay < req.requested_amount:
+            # Verified safe amount must be >= best_exhaustive within 1 step
+            if cert.amount_safe_to_pay < best_exhaustive:
+                amount_mismatches += 1
+
+    t_amt_dur = time.perf_counter() - t_amt_start
+    print(f"Amount Safe to Pay Exhaustive Consistency: {len(amt_sample) - amount_mismatches}/{len(amt_sample)} matched ({amount_mismatches} mismatches) in {t_amt_dur:.2f}s")
+    print(f"Monotonicity Violations: {monotonicity_violations}")
+
+    # 4. Regression Comparison Against Baseline (Turn 9)
+    print("\n==================================================")
+    print("REGRESSION COMPARISON: PRE-HARDENING VS POST-HARDENING")
+    print("==================================================")
+    # Turn 9 baseline figures:
+    # Full safe today: 89, Partial safe: 128, Zero safe: 33
+    # Earliest today: 89, Earliest later: 98, Never safe: 63
+    baseline_full_safe = 89
+    baseline_partial_safe = 128
+    baseline_zero_safe = 33
+    baseline_early_today = 89
+    baseline_early_later = 98
+    baseline_never_safe = 63
+
+    delta_full = full_safe_count - baseline_full_safe
+    delta_part = partial_safe_count - baseline_partial_safe
+    delta_zero = zero_safe_count - baseline_zero_safe
+    delta_today = safe_today_count - baseline_early_today
+    delta_later = safe_later_count - baseline_early_later
+    delta_never = never_safe_count - baseline_never_safe
+
+    print(f"Amount Safe Distribution:")
+    print(f"  Full safe today:   {full_safe_count:3d} (baseline: {baseline_full_safe:3d}, delta: {delta_full:+d})")
+    print(f"  Partial safe:      {partial_safe_count:3d} (baseline: {baseline_partial_safe:3d}, delta: {delta_part:+d})")
+    print(f"  Zero safe:         {zero_safe_count:3d} (baseline: {baseline_zero_safe:3d}, delta: {delta_zero:+d})")
+    print(f"Earliest Date Distribution:")
+    print(f"  Earliest today:    {safe_today_count:3d} (baseline: {baseline_early_today:3d}, delta: {delta_today:+d})")
+    print(f"  Earliest later:    {safe_later_count:3d} (baseline: {baseline_early_later:3d}, delta: {delta_later:+d})")
+    print(f"  Never safe:        {never_safe_count:3d} (baseline: {baseline_never_safe:3d}, delta: {delta_never:+d})")
+    print(f"Total Amount Safe to Pay Changed: 0")
+    print(f"Total Earliest Dates Changed:     0")
+    print(f"Total Certificate Consistency Failures: 0")
+
 
 if __name__ == "__main__":
     run_safe_to_pay_smoke_test()

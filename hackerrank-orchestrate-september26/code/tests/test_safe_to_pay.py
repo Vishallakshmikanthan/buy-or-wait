@@ -5,22 +5,30 @@ Covers:
 - All 7 metamorphic property tests from Section 20
 """
 
+import csv
 from datetime import date, timedelta
 from decimal import Decimal
+from pathlib import Path
+from typing import List, Optional, Sequence, Tuple
 import unittest
 
 from code.canonical import CanonicalEvent, CashImpactType, Direction, RecurrenceClassification
 from code.models import FinancialProfile, FinancialRequest
 from code.recurrence import FutureEvent, RecurrenceFrequency
 from code.safe_to_pay import (
+    CURRENCY_QUANTUM,
+    SafeToPayCertificate,
     calculate_amount_safe_to_pay,
     calculate_earliest_full_payment_date,
     evaluate_request_safe_to_pay,
+    get_currency_quantum,
     is_purchase_safe,
     make_candidate_purchase_event,
 )
 from code.simulator import (
+    EventPriority,
     SimulatedEvent,
+    SimulationResult,
     create_initial_state,
     simulate_user,
 )
@@ -608,5 +616,1011 @@ class TestMetamorphicProperties(unittest.TestCase):
         self.assertEqual(c1.earliest_date_for_full_payment, c2.earliest_date_for_full_payment)
 
 
+class TestCurrencyQuantumAudit(unittest.TestCase):
+    """Audit and verification of currency quantum across the dataset and contest semantics."""
+
+    def setUp(self) -> None:
+        self.dataset_dir = Path(__file__).resolve().parent.parent.parent / "dataset"
+
+    def test_real_requests_quantum_compatibility(self) -> None:
+        """Every requested_amount in requests.csv and sample_requests.csv must be a multiple of quantum."""
+        profiles = {}
+        with open(self.dataset_dir / "financial_profiles.csv", "r", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                profiles[r["user_id"]] = r["home_currency"]
+
+        for req_file in ["requests.csv", "sample_requests.csv"]:
+            file_path = self.dataset_dir / req_file
+            if not file_path.exists():
+                continue
+            with open(file_path, "r", encoding="utf-8") as f:
+                for line_no, r in enumerate(csv.DictReader(f), start=2):
+                    curr = profiles[r["user_id"]]
+                    q = get_currency_quantum(curr)
+                    amt = Decimal(r["requested_amount"])
+                    remainder = amt % q
+                    self.assertEqual(
+                        remainder,
+                        Decimal("0"),
+                        f"Non-quantum amount {amt} for currency {curr} in {req_file}:{line_no}",
+                    )
+
+    def test_quantum_map_covers_all_profile_currencies(self) -> None:
+        """All distinct currencies present in financial_profiles.csv must be present in CURRENCY_QUANTUM."""
+        with open(self.dataset_dir / "financial_profiles.csv", "r", encoding="utf-8") as f:
+            currencies = {r["home_currency"] for r in csv.DictReader(f)}
+
+        for curr in currencies:
+            self.assertIn(curr, CURRENCY_QUANTUM, f"Currency {curr} not found in CURRENCY_QUANTUM")
+            self.assertEqual(
+                CURRENCY_QUANTUM[curr],
+                Decimal("0.01"),
+                f"Currency {curr} quantum must be 0.01 in this dataset",
+            )
+
+    def test_dataset_all_monetary_tables_representable_to_two_decimals(self) -> None:
+        """Verify no monetary column across profiles, events, or payment options requires finer than 0.01."""
+        q = Decimal("0.01")
+        # Check profiles
+        with open(self.dataset_dir / "financial_profiles.csv", "r", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                self.assertEqual(Decimal(r["current_available_balance"]) % q, Decimal("0"))
+                self.assertEqual(Decimal(r["minimum_balance_to_keep"]) % q, Decimal("0"))
+
+        # Check events
+        with open(self.dataset_dir / "financial_events.csv", "r", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                amt_str = r.get("amount")
+                if amt_str:
+                    self.assertEqual(Decimal(amt_str) % q, Decimal("0"))
+
+        # Check payment options
+        opt_path = self.dataset_dir / "request_payment_options.csv"
+        if opt_path.exists():
+            with open(opt_path, "r", encoding="utf-8") as f:
+                for r in csv.DictReader(f):
+                    for col in ["payment_amount", "financing_fee", "total_payable_amount"]:
+                        val = r.get(col)
+                        if val:
+                            self.assertEqual(Decimal(val) % q, Decimal("0"))
+
+
+class TestHeadroomShortcutTranslationInvariant(unittest.TestCase):
+    """Formal proof and verification of the candidate purchase translation property.
+
+    Mathematical Invariant:
+    For two candidate amounts X and Y where Y > X, when candidate purchase is injected
+    at request_date at EventPriority.OUTFLOW:
+        minimum_available_after(Y) = minimum_available_after(X) - (Y - X)
+    and for every date t >= request_date:
+        available_cash_after(Y, t) = available_cash_after(X, t) - (Y - X)
+    """
+
+    def setUp(self) -> None:
+        self.user_id = "test_user_invariant"
+        self.request_date = date(2025, 1, 1)
+        self.sim_start = self.request_date
+        self.sim_end = self.request_date + timedelta(days=90)
+        self.profile = FinancialProfile(
+            user_id=self.user_id,
+            home_currency="USD",
+            current_available_balance=Decimal("1500.00"),
+            minimum_balance_to_keep=Decimal("200.00"),
+            financial_priorities=("savings",),
+            expense_categories_to_protect=("rent",),
+            expense_categories_user_is_willing_to_reduce=(),
+            expense_categories_user_is_willing_to_stop=(),
+            payment_methods_user_will_consider=("full_payment",),
+            max_installment_months=None,
+        )
+        self.request = FinancialRequest(
+            request_id="req_inv",
+            user_id=self.user_id,
+            request_date=self.request_date,
+            request_type="purchase",
+            requested_amount=Decimal("500.00"),
+            desired_completion_date=self.request_date + timedelta(days=30),
+            allows_partial_payment=True,
+            request_text="Invariant test",
+        )
+
+    def _assert_translation_property(
+        self,
+        canonical: Sequence[CanonicalEvent],
+        future: Sequence[FutureEvent],
+        amt_x: Decimal,
+        amt_y: Decimal,
+    ) -> None:
+        self.assertGreater(amt_y, amt_x)
+        delta = amt_y - amt_x
+
+        ev_x = make_candidate_purchase_event(self.request, amt_x, self.request_date, "USD", event_id="candidate_purchase_inv")
+        ev_y = make_candidate_purchase_event(self.request, amt_y, self.request_date, "USD", event_id="candidate_purchase_inv")
+
+        res_x = simulate_user(self.user_id, self.sim_start, self.sim_end, canonical_events=canonical, future_events=future, profile=self.profile, additional_events=[ev_x])
+        res_y = simulate_user(self.user_id, self.sim_start, self.sim_end, canonical_events=canonical, future_events=future, profile=self.profile, additional_events=[ev_y])
+
+        # 1. Identify candidate step
+        cand_step_x = [t.step for t in res_x.event_transitions if t.event_id == ev_x.event_id][0]
+        cand_step_y = [t.step for t in res_y.event_transitions if t.event_id == ev_y.event_id][0]
+
+        post_transitions_x = [t for t in res_x.event_transitions if t.step >= cand_step_x]
+        post_transitions_y = [t for t in res_y.event_transitions if t.step >= cand_step_y]
+
+        self.assertEqual(len(post_transitions_x), len(post_transitions_y))
+
+        # Every transition after candidate shifts by exactly delta
+        for tx, ty in zip(post_transitions_x, post_transitions_y):
+            self.assertEqual(tx.event_id, ty.event_id)
+            self.assertEqual(
+                ty.available_after,
+                tx.available_after - delta,
+                f"Transition for {tx.event_id} did not shift by delta {delta}: {ty.available_after} vs {tx.available_after - delta}",
+            )
+
+        # 2. Minimum available cash after candidate purchase invariant
+        min_after_x = min(t.available_after for t in post_transitions_x)
+        min_after_y = min(t.available_after for t in post_transitions_y)
+        self.assertEqual(
+            min_after_y,
+            min_after_x - delta,
+            f"Post-candidate minimum available cash did not translate linearly: {min_after_y} vs {min_after_x - delta}",
+        )
+
+        # 3. Daily closing available cash invariant for all days on or after request date
+        for snap_x, snap_y in zip(res_x.daily_snapshots, res_y.daily_snapshots):
+            self.assertEqual(snap_x.date, snap_y.date)
+            if snap_x.date >= self.request_date:
+                self.assertEqual(
+                    snap_y.closing_available_cash,
+                    snap_x.closing_available_cash - delta,
+                    f"Day {snap_x.date} closing cash did not shift by delta {delta}",
+                )
+
+    def test_invariant_no_future_events(self) -> None:
+        self._assert_translation_property([], [], Decimal("100.00"), Decimal("250.00"))
+
+    def test_invariant_future_mandatory_outflow(self) -> None:
+        exp = CanonicalEvent(
+            event_id="exp_inv", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 10),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("400.00"),
+            currency_original="USD", amount_home=Decimal("400.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 10), status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+            category="rent", description="Rent", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        self._assert_translation_property([exp], [], Decimal("50.00"), Decimal("200.00"))
+
+    def test_invariant_future_salary(self) -> None:
+        sal = FutureEvent(
+            event_id="sal_inv", user_id=self.user_id, effective_date=date(2025, 1, 15),
+            direction=Direction.INFLOW, amount_home=Decimal("1000.00"), currency="USD",
+            category="salary", event_type="income", description="Salary", series_id="s1",
+            frequency=RecurrenceFrequency.MONTHLY, is_forecast=True,
+        )
+        self._assert_translation_property([], [sal], Decimal("100.00"), Decimal("400.00"))
+
+    def test_invariant_pending_debit_reserved(self) -> None:
+        pend = CanonicalEvent(
+            event_id="pend_inv", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 1),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("200.00"),
+            currency_original="USD", amount_home=Decimal("200.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 1), status="pending",
+            is_cash_event=True, cash_impact_type=CashImpactType.PENDING_DEBIT_RESERVED, event_type="expense",
+            category="groceries", description="Pending grocery hold", flexibility="fixed",
+            minimum_allowed_amount_original=None, minimum_allowed_amount_home=None, linked_event_id=None,
+            recurrence_type=RecurrenceClassification.UNKNOWN, is_unresolved=False, unresolved_reason=None,
+            evidence_chain=(), applied_actions=(),
+        )
+        self._assert_translation_property([pend], [], Decimal("100.00"), Decimal("300.00"))
+
+    def test_invariant_same_day_salary(self) -> None:
+        sal_today = CanonicalEvent(
+            event_id="sal_today", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 1),
+            direction=Direction.INFLOW, direction_original="INFLOW", amount_original=Decimal("800.00"),
+            currency_original="USD", amount_home=Decimal("800.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 1), status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_INFLOW, event_type="income",
+            category="salary", description="Salary today", flexibility="fixed",
+            minimum_allowed_amount_original=None, minimum_allowed_amount_home=None, linked_event_id=None,
+            recurrence_type=RecurrenceClassification.UNKNOWN, is_unresolved=False, unresolved_reason=None,
+            evidence_chain=(), applied_actions=(),
+        )
+        self._assert_translation_property([sal_today], [], Decimal("150.00"), Decimal("450.00"))
+
+    def test_invariant_same_day_obligation(self) -> None:
+        ob_today = CanonicalEvent(
+            event_id="ob_today", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 1),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("300.00"),
+            currency_original="USD", amount_home=Decimal("300.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 1), status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+            category="bills", description="Bill today", flexibility="fixed",
+            minimum_allowed_amount_original=None, minimum_allowed_amount_home=None, linked_event_id=None,
+            recurrence_type=RecurrenceClassification.UNKNOWN, is_unresolved=False, unresolved_reason=None,
+            evidence_chain=(), applied_actions=(),
+        )
+        self._assert_translation_property([ob_today], [], Decimal("50.00"), Decimal("200.00"))
+
+    def test_invariant_safety_floor_boundary(self) -> None:
+        # Initial cash: 1500, floor: 200. Headroom: 1300.
+        # Compare amounts close to the headroom boundary: 1299.00 and 1300.00
+        self._assert_translation_property([], [], Decimal("1299.00"), Decimal("1300.00"))
+
+    def test_invariant_baseline_close_to_floor(self) -> None:
+        # Outflow leaves only 10.00 headroom above floor
+        exp = CanonicalEvent(
+            event_id="exp_tight", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 10),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("1290.00"),
+            currency_original="USD", amount_home=Decimal("1290.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 10), status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+            category="rent", description="Tight rent", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        self._assert_translation_property([exp], [], Decimal("1.00"), Decimal("5.00"))
+
+
+class TestExhaustiveAmountCrossCheck(unittest.TestCase):
+    """Exhaustive comparison: optimized calculate_amount_safe_to_pay vs brute-force search."""
+
+    def setUp(self) -> None:
+        self.user_id = "test_user_exhaustive"
+        self.request_date = date(2025, 1, 1)
+        self.sim_start = self.request_date
+        self.sim_end = self.request_date + timedelta(days=90)
+        self.profile = FinancialProfile(
+            user_id=self.user_id,
+            home_currency="USD",
+            current_available_balance=Decimal("100.00"),
+            minimum_balance_to_keep=Decimal("20.00"),
+            financial_priorities=("savings",),
+            expense_categories_to_protect=(),
+            expense_categories_user_is_willing_to_reduce=(),
+            expense_categories_user_is_willing_to_stop=(),
+            payment_methods_user_will_consider=("full_payment",),
+            max_installment_months=None,
+        )
+        self.request = FinancialRequest(
+            request_id="req_ex",
+            user_id=self.user_id,
+            request_date=self.request_date,
+            request_type="purchase",
+            requested_amount=Decimal("50.00"),
+            desired_completion_date=self.request_date + timedelta(days=30),
+            allows_partial_payment=True,
+            request_text="Exhaustive test",
+        )
+        self.q = Decimal("1.00")  # Coarse quantum for fast exhaustive test
+
+    def _brute_force_safe_amount(
+        self,
+        baseline: SimulationResult,
+        canonical: Sequence[CanonicalEvent],
+        future: Sequence[FutureEvent],
+        q: Decimal,
+    ) -> Decimal:
+        req_amt = self.request.requested_amount
+        max_units = int(req_amt / q)
+        best_amt = Decimal("0")
+        for u in range(max_units + 1):
+            cand_amt = u * q
+            cand_ev = make_candidate_purchase_event(self.request, cand_amt, self.request_date, "USD")
+            safe, _ = is_purchase_safe(self.user_id, self.sim_start, self.sim_end, canonical, future, self.profile, cand_ev)
+            if safe:
+                best_amt = cand_amt
+        return best_amt
+
+    def _assert_exhaustive_agreement(
+        self,
+        canonical: Sequence[CanonicalEvent] = (),
+        future: Sequence[FutureEvent] = (),
+        q: Decimal = Decimal("1.00"),
+    ) -> None:
+        baseline = simulate_user(self.user_id, self.sim_start, self.sim_end, canonical_events=canonical, future_events=future, profile=self.profile)
+        optimized_amt, _, method = calculate_amount_safe_to_pay(self.request, baseline, canonical, future, self.profile, quantum=q)
+        exhaustive_amt = self._brute_force_safe_amount(baseline, canonical, future, q)
+        self.assertEqual(
+            optimized_amt,
+            exhaustive_amt,
+            f"Mismatched amount: optimized={optimized_amt} (method={method}), exhaustive={exhaustive_amt}",
+        )
+
+    def test_exhaustive_no_future_events(self) -> None:
+        self._assert_exhaustive_agreement()
+
+    def test_exhaustive_future_mandatory_outflow(self) -> None:
+        exp = CanonicalEvent(
+            event_id="e_fut", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 10),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("35.00"),
+            currency_original="USD", amount_home=Decimal("35.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 10), status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+            category="utilities", description="Electric", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        self._assert_exhaustive_agreement(canonical=[exp])
+
+    def test_exhaustive_future_salary(self) -> None:
+        sal = FutureEvent(
+            event_id="sal_fut", user_id=self.user_id, effective_date=date(2025, 1, 15),
+            direction=Direction.INFLOW, amount_home=Decimal("100.00"), currency="USD",
+            category="salary", event_type="income", description="Salary", series_id="s1",
+            frequency=RecurrenceFrequency.MONTHLY, is_forecast=True,
+        )
+        self._assert_exhaustive_agreement(future=[sal])
+
+    def test_exhaustive_pending_debit(self) -> None:
+        pend = CanonicalEvent(
+            event_id="p_deb", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 1),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("15.00"),
+            currency_original="USD", amount_home=Decimal("15.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 1), status="pending",
+            is_cash_event=True, cash_impact_type=CashImpactType.PENDING_DEBIT_RESERVED, event_type="expense",
+            category="shopping", description="Hold", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        self._assert_exhaustive_agreement(canonical=[pend])
+
+    def test_exhaustive_same_day_salary(self) -> None:
+        sal = CanonicalEvent(
+            event_id="s_today", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 1),
+            direction=Direction.INFLOW, direction_original="INFLOW", amount_original=Decimal("50.00"),
+            currency_original="USD", amount_home=Decimal("50.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 1), status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_INFLOW, event_type="income",
+            category="salary", description="Salary today", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        self._assert_exhaustive_agreement(canonical=[sal])
+
+    def test_exhaustive_same_day_pending_hold(self) -> None:
+        pend = CanonicalEvent(
+            event_id="p_today", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 1),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("25.00"),
+            currency_original="USD", amount_home=Decimal("25.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 1), status="pending",
+            is_cash_event=True, cash_impact_type=CashImpactType.PENDING_DEBIT_RESERVED, event_type="expense",
+            category="shopping", description="Pending hold", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        self._assert_exhaustive_agreement(canonical=[pend])
+
+    def test_exhaustive_same_day_obligation(self) -> None:
+        ob = CanonicalEvent(
+            event_id="o_today", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 1),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("30.00"),
+            currency_original="USD", amount_home=Decimal("30.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 1), status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+            category="bills", description="Bill today", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        self._assert_exhaustive_agreement(canonical=[ob])
+
+    def test_exhaustive_safety_floor_boundary(self) -> None:
+        # Outflow leaves exactly 0 headroom (100 - 80 = 20 floor)
+        exp = CanonicalEvent(
+            event_id="e_bound", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 5),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("80.00"),
+            currency_original="USD", amount_home=Decimal("80.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 5), status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+            category="rent", description="Boundary rent", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        self._assert_exhaustive_agreement(canonical=[exp])
+
+    def test_exhaustive_baseline_close_to_floor(self) -> None:
+        # Outflow leaves 3.00 headroom above floor
+        exp = CanonicalEvent(
+            event_id="e_close", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 5),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("77.00"),
+            currency_original="USD", amount_home=Decimal("77.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 5), status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+            category="rent", description="Close rent", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        self._assert_exhaustive_agreement(canonical=[exp])
+
+    def test_exhaustive_baseline_already_unsafe(self) -> None:
+        # Outflow breaches floor (100 - 85 = 15 < 20 floor)
+        exp = CanonicalEvent(
+            event_id="e_breach", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 5),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("85.00"),
+            currency_original="USD", amount_home=Decimal("85.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 5), status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+            category="rent", description="Breach rent", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        self._assert_exhaustive_agreement(canonical=[exp])
+
+
+class TestStrengthenedMonotonicityPrefix(unittest.TestCase):
+    """Formal verification of the strict prefix monotonicity property:
+
+    For any sequence of discrete candidate amounts 0, q, 2q, ..., requested_amount:
+    is_purchase_safe(k * q) MUST follow:
+        [SAFE, SAFE, ..., SAFE, UNSAFE, UNSAFE, ..., UNSAFE]
+    Never:
+        [SAFE, UNSAFE, SAFE, ...]
+    """
+
+    def setUp(self) -> None:
+        self.user_id = "test_user_mono"
+        self.request_date = date(2025, 1, 1)
+        self.sim_start = self.request_date
+        self.sim_end = self.request_date + timedelta(days=90)
+        self.profile = FinancialProfile(
+            user_id=self.user_id,
+            home_currency="USD",
+            current_available_balance=Decimal("100.00"),
+            minimum_balance_to_keep=Decimal("20.00"),
+            financial_priorities=("savings",),
+            expense_categories_to_protect=(),
+            expense_categories_user_is_willing_to_reduce=(),
+            expense_categories_user_is_willing_to_stop=(),
+            payment_methods_user_will_consider=("full_payment",),
+            max_installment_months=None,
+        )
+        self.request = FinancialRequest(
+            request_id="req_mono",
+            user_id=self.user_id,
+            request_date=self.request_date,
+            request_type="purchase",
+            requested_amount=Decimal("50.00"),
+            desired_completion_date=self.request_date + timedelta(days=30),
+            allows_partial_payment=True,
+            request_text="Monotonicity test",
+        )
+
+    def _verify_monotonicity_prefix(
+        self,
+        canonical: Sequence[CanonicalEvent] = (),
+        future: Sequence[FutureEvent] = (),
+        q: Decimal = Decimal("1.00"),
+    ) -> None:
+        req_amt = self.request.requested_amount
+        max_units = int(req_amt / q)
+        predicates: List[bool] = []
+
+        for u in range(max_units + 1):
+            cand_amt = u * q
+            cand_ev = make_candidate_purchase_event(self.request, cand_amt, self.request_date, "USD")
+            safe, _ = is_purchase_safe(self.user_id, self.sim_start, self.sim_end, canonical, future, self.profile, cand_ev)
+            predicates.append(safe)
+
+        # Monotonicity rule: Once a False occurs, all subsequent entries must be False
+        seen_false = False
+        for idx, p in enumerate(predicates):
+            if seen_false and p:
+                self.fail(
+                    f"Non-monotonic predicate at index {idx} (amount {idx * q}): saw SAFE after UNSAFE! Sequence: {predicates}"
+                )
+            if not p:
+                seen_false = True
+
+    def test_monotonicity_clean_slate(self) -> None:
+        self._verify_monotonicity_prefix()
+
+    def test_monotonicity_with_interleaved_events(self) -> None:
+        e1 = CanonicalEvent(
+            event_id="e1", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 5),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("30.00"),
+            currency_original="USD", amount_home=Decimal("30.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 5), status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+            category="bills", description="Bill", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        sal = FutureEvent(
+            event_id="s1", user_id=self.user_id, effective_date=date(2025, 1, 15),
+            direction=Direction.INFLOW, amount_home=Decimal("40.00"), currency="USD",
+            category="salary", event_type="income", description="Salary", series_id="s1",
+            frequency=RecurrenceFrequency.MONTHLY, is_forecast=True,
+        )
+        self._verify_monotonicity_prefix(canonical=[e1], future=[sal])
+
+
+class TestEarliestDateExhaustiveCrossCheck(unittest.TestCase):
+    """Exhaustive comparison: calculate_earliest_full_payment_date vs 91-day brute-force evaluation."""
+
+    def setUp(self) -> None:
+        self.user_id = "test_user_earliest"
+        self.request_date = date(2025, 1, 1)
+        self.sim_start = self.request_date
+        self.sim_end = self.request_date + timedelta(days=90)
+        self.profile = FinancialProfile(
+            user_id=self.user_id,
+            home_currency="USD",
+            current_available_balance=Decimal("500.00"),
+            minimum_balance_to_keep=Decimal("100.00"),
+            financial_priorities=("savings",),
+            expense_categories_to_protect=(),
+            expense_categories_user_is_willing_to_reduce=(),
+            expense_categories_user_is_willing_to_stop=(),
+            payment_methods_user_will_consider=("full_payment",),
+            max_installment_months=None,
+        )
+        self.request = FinancialRequest(
+            request_id="req_early",
+            user_id=self.user_id,
+            request_date=self.request_date,
+            request_type="purchase",
+            requested_amount=Decimal("400.00"),
+            desired_completion_date=self.request_date + timedelta(days=30),
+            allows_partial_payment=True,
+            request_text="Earliest test",
+        )
+
+    def _brute_force_earliest_date(
+        self,
+        canonical: Sequence[CanonicalEvent],
+        future: Sequence[FutureEvent],
+    ) -> Optional[date]:
+        for offset in range(91):
+            cand_d = self.request_date + timedelta(days=offset)
+            cand_ev = make_candidate_purchase_event(self.request, self.request.requested_amount, cand_d, "USD")
+            safe, _ = is_purchase_safe(self.user_id, self.sim_start, self.sim_end, canonical, future, self.profile, cand_ev)
+            if safe:
+                return cand_d
+        return None
+
+    def _assert_earliest_date_agreement(
+        self,
+        canonical: Sequence[CanonicalEvent] = (),
+        future: Sequence[FutureEvent] = (),
+    ) -> None:
+        baseline = simulate_user(self.user_id, self.sim_start, self.sim_end, canonical_events=canonical, future_events=future, profile=self.profile)
+        optimized_date = calculate_earliest_full_payment_date(self.request, baseline, canonical, future, self.profile)
+        exhaustive_date = self._brute_force_earliest_date(canonical, future)
+        self.assertEqual(
+            optimized_date,
+            exhaustive_date,
+            f"Earliest date mismatch: optimized={optimized_date}, exhaustive={exhaustive_date}",
+        )
+
+    def test_earliest_safe_today(self) -> None:
+        self._assert_earliest_date_agreement()
+
+    def test_earliest_safe_after_salary(self) -> None:
+        # Starting cash: 500, floor: 100. Bill on Jan 5 of 300 => leaves 200 (not enough for 400).
+        # Salary on Jan 10 of 1000 => leaves 1200. Full 400 becomes safe on Jan 10.
+        exp = CanonicalEvent(
+            event_id="b1", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 5),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("300.00"),
+            currency_original="USD", amount_home=Decimal("300.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 5), status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+            category="bills", description="Bill", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        sal = FutureEvent(
+            event_id="sal1", user_id=self.user_id, effective_date=date(2025, 1, 10),
+            direction=Direction.INFLOW, amount_home=Decimal("1000.00"), currency="USD",
+            category="salary", event_type="income", description="Salary", series_id="s1",
+            frequency=RecurrenceFrequency.MONTHLY, is_forecast=True,
+        )
+        self._assert_earliest_date_agreement(canonical=[exp], future=[sal])
+
+    def test_earliest_safe_after_multiple_salaries(self) -> None:
+        # Bill on Jan 5 of 450 => leaves 50.
+        # Sal 1 on Jan 10 of 200 => leaves 250 (still not enough for 400 + 100 floor = 500).
+        # Sal 2 on Jan 20 of 300 => leaves 550 (now safe!).
+        exp = CanonicalEvent(
+            event_id="b1", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 5),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("450.00"),
+            currency_original="USD", amount_home=Decimal("450.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 5), status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+            category="bills", description="Big bill", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        sal1 = FutureEvent(
+            event_id="sal1", user_id=self.user_id, effective_date=date(2025, 1, 10),
+            direction=Direction.INFLOW, amount_home=Decimal("200.00"), currency="USD",
+            category="salary", event_type="income", description="Salary 1", series_id="s1",
+            frequency=RecurrenceFrequency.MONTHLY, is_forecast=True,
+        )
+        sal2 = FutureEvent(
+            event_id="sal2", user_id=self.user_id, effective_date=date(2025, 1, 20),
+            direction=Direction.INFLOW, amount_home=Decimal("300.00"), currency="USD",
+            category="salary", event_type="income", description="Salary 2", series_id="s1",
+            frequency=RecurrenceFrequency.MONTHLY, is_forecast=True,
+        )
+        self._assert_earliest_date_agreement(canonical=[exp], future=[sal1, sal2])
+
+    def test_earliest_safe_after_an_obligation(self) -> None:
+        # Jan 2: Obligation of 100. Jan 10: Inflow of 600.
+        ob = CanonicalEvent(
+            event_id="ob1", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 2),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("100.00"),
+            currency_original="USD", amount_home=Decimal("100.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 2), status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+            category="rent", description="Rent", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        sal = FutureEvent(
+            event_id="sal1", user_id=self.user_id, effective_date=date(2025, 1, 10),
+            direction=Direction.INFLOW, amount_home=Decimal("600.00"), currency="USD",
+            category="salary", event_type="income", description="Salary", series_id="s1",
+            frequency=RecurrenceFrequency.MONTHLY, is_forecast=True,
+        )
+        self._assert_earliest_date_agreement(canonical=[ob], future=[sal])
+
+    def test_earliest_same_day_salary(self) -> None:
+        sal_today = CanonicalEvent(
+            event_id="sal_td", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 1),
+            direction=Direction.INFLOW, direction_original="INFLOW", amount_original=Decimal("500.00"),
+            currency_original="USD", amount_home=Decimal("500.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 1), status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_INFLOW, event_type="income",
+            category="salary", description="Salary today", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        self._assert_earliest_date_agreement(canonical=[sal_today])
+
+    def test_earliest_pending_debit(self) -> None:
+        pend = CanonicalEvent(
+            event_id="pend_d", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 1),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("150.00"),
+            currency_original="USD", amount_home=Decimal("150.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 1), status="pending",
+            is_cash_event=True, cash_impact_type=CashImpactType.PENDING_DEBIT_RESERVED, event_type="expense",
+            category="shopping", description="Pending debit", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        sal = FutureEvent(
+            event_id="sal1", user_id=self.user_id, effective_date=date(2025, 1, 10),
+            direction=Direction.INFLOW, amount_home=Decimal("500.00"), currency="USD",
+            category="salary", event_type="income", description="Salary", series_id="s1",
+            frequency=RecurrenceFrequency.MONTHLY, is_forecast=True,
+        )
+        self._assert_earliest_date_agreement(canonical=[pend], future=[sal])
+
+    def test_earliest_baseline_unsafe(self) -> None:
+        # Baseline breaches floor on Jan 5 (500 - 450 = 50 < 100 floor)
+        breach = CanonicalEvent(
+            event_id="brk", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 5),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("450.00"),
+            currency_original="USD", amount_home=Decimal("450.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 5), status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+            category="rent", description="Breaching rent", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        self._assert_earliest_date_agreement(canonical=[breach])
+
+    def test_earliest_never_safe(self) -> None:
+        # Heavy recurring bills every week, no income
+        bills = [
+            FutureEvent(
+                event_id=f"bill_{i}", user_id=self.user_id, effective_date=date(2025, 1, 1) + timedelta(days=i * 7),
+                direction=Direction.OUTFLOW, amount_home=Decimal("100.00"), currency="USD",
+                category="bills", event_type="expense", description="Weekly bill", series_id="s_b",
+                frequency=RecurrenceFrequency.WEEKLY, is_forecast=True,
+            )
+            for i in range(1, 12)
+        ]
+        self._assert_earliest_date_agreement(future=bills)
+
+    def test_earliest_exact_final_horizon_date(self) -> None:
+        # Outflow today leaves 200 (not enough for 400).
+        # Huge salary arrives on EXACT final day (Day 90 = 2025-04-01).
+        final_d = self.request_date + timedelta(days=90)
+        exp = CanonicalEvent(
+            event_id="b1", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 2),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("250.00"),
+            currency_original="USD", amount_home=Decimal("250.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 2), status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+            category="bills", description="Bill", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        sal = FutureEvent(
+            event_id="sal_final", user_id=self.user_id, effective_date=final_d,
+            direction=Direction.INFLOW, amount_home=Decimal("2000.00"), currency="USD",
+            category="salary", event_type="income", description="Final day salary", series_id="s1",
+            frequency=RecurrenceFrequency.MONTHLY, is_forecast=True,
+        )
+        self._assert_earliest_date_agreement(canonical=[exp], future=[sal])
+
+    def test_earliest_fluctuating_cash_trajectory(self) -> None:
+        # Cash goes up and down over multiple weeks
+        events = [
+            CanonicalEvent(
+                event_id="e_fluct_1", user_id=self.user_id, source_row=1, effective_date=date(2025, 1, 5),
+                direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("300.00"),
+                currency_original="USD", amount_home=Decimal("300.00"), home_currency="USD",
+                exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 5), status="settled",
+                is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+                category="rent", description="Rent", flexibility="fixed", minimum_allowed_amount_original=None,
+                minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+                is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+            ),
+            CanonicalEvent(
+                event_id="e_fluct_2", user_id=self.user_id, source_row=2, effective_date=date(2025, 1, 20),
+                direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("200.00"),
+                currency_original="USD", amount_home=Decimal("200.00"), home_currency="USD",
+                exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 20), status="settled",
+                is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+                category="bills", description="Bill", flexibility="fixed", minimum_allowed_amount_original=None,
+                minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+                is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+            ),
+        ]
+        sal = FutureEvent(
+            event_id="sal_f", user_id=self.user_id, effective_date=date(2025, 1, 15),
+            direction=Direction.INFLOW, amount_home=Decimal("400.00"), currency="USD",
+            category="salary", event_type="income", description="Salary", series_id="s1",
+            frequency=RecurrenceFrequency.MONTHLY, is_forecast=True,
+        )
+        sal2 = FutureEvent(
+            event_id="sal_f2", user_id=self.user_id, effective_date=date(2025, 2, 1),
+            direction=Direction.INFLOW, amount_home=Decimal("1000.00"), currency="USD",
+            category="salary", event_type="income", description="Salary 2", series_id="s1",
+            frequency=RecurrenceFrequency.MONTHLY, is_forecast=True,
+        )
+        self._assert_earliest_date_agreement(canonical=events, future=[sal, sal2])
+
+
+class TestSameDaySemantics(unittest.TestCase):
+    """Explicit verification of same-day event priorities under simulator.py."""
+
+    def setUp(self) -> None:
+        self.user_id = "test_user_sameday"
+        self.request_date = date(2025, 1, 1)
+        self.sim_start = self.request_date
+        self.sim_end = self.request_date + timedelta(days=90)
+        self.profile = FinancialProfile(
+            user_id=self.user_id,
+            home_currency="USD",
+            current_available_balance=Decimal("300.00"),
+            minimum_balance_to_keep=Decimal("100.00"),
+            financial_priorities=("savings",),
+            expense_categories_to_protect=(),
+            expense_categories_user_is_willing_to_reduce=(),
+            expense_categories_user_is_willing_to_stop=(),
+            payment_methods_user_will_consider=("full_payment",),
+            max_installment_months=None,
+        )
+        self.request = FinancialRequest(
+            request_id="req_sd",
+            user_id=self.user_id,
+            request_date=self.request_date,
+            request_type="purchase",
+            requested_amount=Decimal("400.00"),
+            desired_completion_date=self.request_date + timedelta(days=30),
+            allows_partial_payment=True,
+            request_text="Same day test",
+        )
+
+    def test_case_a_salary_before_candidate_purchase(self) -> None:
+        """Case A: Salary arrives on request date. Candidate purchase executes after salary."""
+        # Initial cash 300, floor 100 => Headroom 200 (not enough for 400).
+        # But salary of 500 arrives on Jan 1. Inflow is Priority 0 (candidate is Priority 2).
+        # Balance becomes 800 before purchase runs, making 400 safe today!
+        salary = CanonicalEvent(
+            event_id="sal_same_day", user_id=self.user_id, source_row=1, effective_date=self.request_date,
+            direction=Direction.INFLOW, direction_original="INFLOW", amount_original=Decimal("500.00"),
+            currency_original="USD", amount_home=Decimal("500.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=self.request_date, status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_INFLOW, event_type="income",
+            category="salary", description="Salary same day", flexibility="fixed",
+            minimum_allowed_amount_original=None, minimum_allowed_amount_home=None, linked_event_id=None,
+            recurrence_type=RecurrenceClassification.UNKNOWN, is_unresolved=False, unresolved_reason=None,
+            evidence_chain=(), applied_actions=(),
+        )
+        baseline = simulate_user(self.user_id, self.sim_start, self.sim_end, canonical_events=[salary], profile=self.profile)
+        cert = evaluate_request_safe_to_pay(self.request, baseline, [salary], [], self.profile)
+        self.assertEqual(cert.amount_safe_to_pay, Decimal("400.00"))
+        self.assertTrue(cert.is_full_payment_safe_today)
+
+    def test_case_b_pending_debit_before_candidate_purchase(self) -> None:
+        """Case B: Pending debit occurs on request date. Pending hold (Priority 1) reserves cash before purchase."""
+        # Initial cash 500, floor 100 => Headroom 400.
+        # But pending hold of 150 occurs on Jan 1. Priority 1 reserves cash to 350 before candidate purchase.
+        # Max safe amount today is 350 - 100 = 250.
+        prof = FinancialProfile(
+            user_id=self.user_id, home_currency="USD", current_available_balance=Decimal("500.00"),
+            minimum_balance_to_keep=Decimal("100.00"), financial_priorities=(), expense_categories_to_protect=(),
+            expense_categories_user_is_willing_to_reduce=(), expense_categories_user_is_willing_to_stop=(),
+            payment_methods_user_will_consider=("full_payment",), max_installment_months=None,
+        )
+        pend = CanonicalEvent(
+            event_id="pend_same_day", user_id=self.user_id, source_row=1, effective_date=self.request_date,
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("150.00"),
+            currency_original="USD", amount_home=Decimal("150.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=self.request_date, status="pending",
+            is_cash_event=True, cash_impact_type=CashImpactType.PENDING_DEBIT_RESERVED, event_type="expense",
+            category="shopping", description="Pending same day", flexibility="fixed",
+            minimum_allowed_amount_original=None, minimum_allowed_amount_home=None, linked_event_id=None,
+            recurrence_type=RecurrenceClassification.UNKNOWN, is_unresolved=False, unresolved_reason=None,
+            evidence_chain=(), applied_actions=(),
+        )
+        baseline = simulate_user(self.user_id, self.sim_start, self.sim_end, canonical_events=[pend], profile=prof)
+        cert = evaluate_request_safe_to_pay(self.request, baseline, [pend], [], prof)
+        self.assertEqual(cert.amount_safe_to_pay, Decimal("250.00"))
+
+    def test_case_c_scheduled_obligation_same_day(self) -> None:
+        """Case C: Scheduled obligation occurs on request date. Deterministic tie-breaker."""
+        prof = FinancialProfile(
+            user_id=self.user_id, home_currency="USD", current_available_balance=Decimal("500.00"),
+            minimum_balance_to_keep=Decimal("100.00"), financial_priorities=(), expense_categories_to_protect=(),
+            expense_categories_user_is_willing_to_reduce=(), expense_categories_user_is_willing_to_stop=(),
+            payment_methods_user_will_consider=("full_payment",), max_installment_months=None,
+        )
+        ob = CanonicalEvent(
+            event_id="bill_same_day", user_id=self.user_id, source_row=1, effective_date=self.request_date,
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("200.00"),
+            currency_original="USD", amount_home=Decimal("200.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=self.request_date, status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+            category="bills", description="Bill same day", flexibility="fixed",
+            minimum_allowed_amount_original=None, minimum_allowed_amount_home=None, linked_event_id=None,
+            recurrence_type=RecurrenceClassification.UNKNOWN, is_unresolved=False, unresolved_reason=None,
+            evidence_chain=(), applied_actions=(),
+        )
+        baseline = simulate_user(self.user_id, self.sim_start, self.sim_end, canonical_events=[ob], profile=prof)
+        cert = evaluate_request_safe_to_pay(self.request, baseline, [ob], [], prof)
+        # 500 - 200 = 300 closing cash. Safety floor 100 => safe amount is 200.
+        self.assertEqual(cert.amount_safe_to_pay, Decimal("200.00"))
+
+    def test_case_d_multiple_same_day_events(self) -> None:
+        """Case D: Salary + pending hold + obligation + candidate purchase all on request date."""
+        sal = CanonicalEvent(
+            event_id="sal_d", user_id=self.user_id, source_row=1, effective_date=self.request_date,
+            direction=Direction.INFLOW, direction_original="INFLOW", amount_original=Decimal("600.00"),
+            currency_original="USD", amount_home=Decimal("600.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=self.request_date, status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_INFLOW, event_type="income",
+            category="salary", description="Salary", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        pend = CanonicalEvent(
+            event_id="pend_d", user_id=self.user_id, source_row=2, effective_date=self.request_date,
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("100.00"),
+            currency_original="USD", amount_home=Decimal("100.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=self.request_date, status="pending",
+            is_cash_event=True, cash_impact_type=CashImpactType.PENDING_DEBIT_RESERVED, event_type="expense",
+            category="groceries", description="Hold", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        bill = CanonicalEvent(
+            event_id="bill_d", user_id=self.user_id, source_row=3, effective_date=self.request_date,
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("200.00"),
+            currency_original="USD", amount_home=Decimal("200.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=self.request_date, status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+            category="bills", description="Bill", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+        # Initial available: 300.
+        # + 600 salary (inflow, p0) => 900
+        # - 100 pending (hold, p1) => 800
+        # - 200 bill (outflow, p2) => 600
+        # Floor: 100 => Headroom = 500.
+        # Requested: 400 => full 400 is safe!
+        baseline = simulate_user(self.user_id, self.sim_start, self.sim_end, canonical_events=[sal, pend, bill], profile=self.profile)
+        cert = evaluate_request_safe_to_pay(self.request, baseline, [sal, pend, bill], [], self.profile)
+        self.assertEqual(cert.amount_safe_to_pay, Decimal("400.00"))
+        self.assertTrue(cert.is_full_payment_safe_today)
+
+
+class TestCandidateEventTranslationInvariantFormal(unittest.TestCase):
+    """Formal test verifying that candidate purchase X vs Y changes ONLY cash states after candidate."""
+
+    def test_formal_event_stream_isolation(self) -> None:
+        uid = "u_iso"
+        req_d = date(2025, 1, 1)
+        prof = FinancialProfile(
+            user_id=uid, home_currency="USD", current_available_balance=Decimal("1000.00"),
+            minimum_balance_to_keep=Decimal("200.00"), financial_priorities=(), expense_categories_to_protect=(),
+            expense_categories_user_is_willing_to_reduce=(), expense_categories_user_is_willing_to_stop=(),
+            payment_methods_user_will_consider=("full_payment",), max_installment_months=None,
+        )
+        req = FinancialRequest(
+            request_id="req_iso", user_id=uid, request_date=req_d, request_type="purchase",
+            requested_amount=Decimal("500.00"), desired_completion_date=req_d + timedelta(days=30),
+            allows_partial_payment=True, request_text="Isolation test",
+        )
+
+        sal = FutureEvent(
+            event_id="s_iso", user_id=uid, effective_date=date(2025, 1, 15),
+            direction=Direction.INFLOW, amount_home=Decimal("1500.00"), currency="USD",
+            category="salary", event_type="income", description="Salary", series_id="s1",
+            frequency=RecurrenceFrequency.MONTHLY, is_forecast=True,
+        )
+
+        ev_100 = make_candidate_purchase_event(req, Decimal("100.00"), req_d, "USD", event_id="cand_purchase")
+        ev_300 = make_candidate_purchase_event(req, Decimal("300.00"), req_d, "USD", event_id="cand_purchase")
+
+        res_100 = simulate_user(uid, req_d, req_d + timedelta(days=90), future_events=[sal], profile=prof, additional_events=[ev_100])
+        res_300 = simulate_user(uid, req_d, req_d + timedelta(days=90), future_events=[sal], profile=prof, additional_events=[ev_300])
+
+        # Verify event stream counts and event_ids are identical
+        self.assertEqual(len(res_100.projected_events), len(res_300.projected_events))
+        for e1, e2 in zip(res_100.projected_events, res_300.projected_events):
+            self.assertEqual(e1.event_id, e2.event_id)
+            self.assertEqual(e1.effective_date, e2.effective_date)
+            self.assertEqual(e1.direction, e2.direction)
+            if e1.event_id != "cand_purchase":
+                self.assertEqual(e1.amount, e2.amount)
+
+        # Verify exact cash difference of 200.00 on every post-candidate transition
+        delta = Decimal("200.00")
+        for t1, t2 in zip(res_100.event_transitions, res_300.event_transitions):
+            self.assertEqual(t1.event_id, t2.event_id)
+            self.assertEqual(t1.date, t2.date)
+            self.assertEqual(t2.available_after, t1.available_after - delta)
+
+
+class TestCertificateCorrectnessAudit(unittest.TestCase):
+    """Audit of SafeToPayCertificate fields and consistency invariants."""
+
+    def test_certificate_fields_consistency(self) -> None:
+        uid = "u_cert"
+        req_d = date(2025, 1, 1)
+        prof = FinancialProfile(
+            user_id=uid, home_currency="USD", current_available_balance=Decimal("600.00"),
+            minimum_balance_to_keep=Decimal("150.00"), financial_priorities=(), expense_categories_to_protect=(),
+            expense_categories_user_is_willing_to_reduce=(), expense_categories_user_is_willing_to_stop=(),
+            payment_methods_user_will_consider=("full_payment",), max_installment_months=None,
+        )
+        req = FinancialRequest(
+            request_id="req_cert", user_id=uid, request_date=req_d, request_type="purchase",
+            requested_amount=Decimal("500.00"), desired_completion_date=req_d + timedelta(days=30),
+            allows_partial_payment=True, request_text="Cert test",
+        )
+        exp = CanonicalEvent(
+            event_id="exp_cert", user_id=uid, source_row=1, effective_date=date(2025, 1, 10),
+            direction=Direction.OUTFLOW, direction_original="OUTFLOW", amount_original=Decimal("200.00"),
+            currency_original="USD", amount_home=Decimal("200.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=date(2025, 1, 10), status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SETTLED_OUTFLOW, event_type="expense",
+            category="rent", description="Rent", flexibility="fixed", minimum_allowed_amount_original=None,
+            minimum_allowed_amount_home=None, linked_event_id=None, recurrence_type=RecurrenceClassification.UNKNOWN,
+            is_unresolved=False, unresolved_reason=None, evidence_chain=(), applied_actions=(),
+        )
+
+        baseline = simulate_user(uid, req_d, req_d + timedelta(days=90), canonical_events=[exp], profile=prof)
+        cert = evaluate_request_safe_to_pay(req, baseline, [exp], [], prof)
+
+        # Headroom: 400 - 150 = 250. Safe amount: 250.
+        self.assertEqual(cert.amount_safe_to_pay, Decimal("250.00"))
+        self.assertEqual(cert.safety_floor, Decimal("150.00"))
+        self.assertEqual(cert.safety_floor_margin, Decimal("0.00"))
+        self.assertEqual(cert.minimum_available_cash_after_purchase, Decimal("150.00"))
+        self.assertEqual(cert.limiting_date, date(2025, 1, 10))
+        self.assertIsNotNone(cert.reason_if_unsafe)
+        self.assertIn("Full payment would breach safety floor", cert.reason_if_unsafe)
+
+
 if __name__ == "__main__":
     unittest.main()
+
