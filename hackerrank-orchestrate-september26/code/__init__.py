@@ -158,6 +158,9 @@ __all__ = [
     "compute_monthly_equivalent",
     "build_user_financial_state",
     "evaluate_user_financial_state",
+    "deduplicate_and_summarize_upcoming_obligations",
+    "SPENDING_TREND_THRESHOLD_PERCENT",
+    "SPENDING_TREND_THRESHOLD_RATIO",
 ]
 
 from .user_state import (
@@ -170,7 +173,11 @@ from .user_state import (
     compute_monthly_equivalent,
     build_user_financial_state,
     evaluate_user_financial_state,
+    deduplicate_and_summarize_upcoming_obligations,
+    SPENDING_TREND_THRESHOLD_PERCENT,
+    SPENDING_TREND_THRESHOLD_RATIO,
 )
+
 
 
 

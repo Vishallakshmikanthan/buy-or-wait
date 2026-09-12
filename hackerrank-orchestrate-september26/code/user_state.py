@@ -5,11 +5,13 @@ the specific request date. Synthesizes authoritative evidence from the canonical
 recurrence engine, and baseline cash-flow simulator without duplicating financial logic.
 
 Follows the single-source-of-truth hierarchy:
-1. Current cash and limits -> financial_profiles.csv / simulator initial state
-2. Pending reservations -> canonical ledger pending-debit semantics
-3. Historical statistics -> canonical ledger events strictly before request_date
-4. Recurring commitments -> frozen recurrence detection engine
-5. Projected trajectory & obligations -> frozen 90-day cash-flow simulator
+1. Current cash and limits -> financial_profiles.csv / baseline simulator initial state.
+2. Pending reservations & ledger balance -> baseline simulator timeline semantics.
+3. Historical statistics -> canonical ledger events strictly before request_date.
+4. Recurring commitments -> frozen recurrence detection engine (recurrence.py).
+5. Projected trajectory & obligations -> frozen 90-day cash-flow simulator (simulator.py).
+6. Upcoming obligations deduplication -> explicit scheduled canonical events take precedence
+   over recurrence forecast occurrences for the same economic obligation.
 """
 
 from __future__ import annotations
@@ -43,6 +45,19 @@ from code.simulator import (
 )
 
 
+# Policy Threshold for Spending Velocity Comparison
+# Changes within ±15% between consecutive 30-day windows reflect normal billing cycle
+# variation (month length, seasonal billing); changes beyond ±15% signify material trend.
+SPENDING_TREND_THRESHOLD_PERCENT: Decimal = Decimal("15.00")
+SPENDING_TREND_THRESHOLD_RATIO: Decimal = Decimal("0.15")
+
+# Telemetry Sufficiency Policy Thresholds
+MIN_HISTORY_DAYS_FOR_INCOME_SUFFICIENCY: int = 60
+MIN_INCOME_EVENTS_FOR_SUFFICIENCY: int = 1
+MIN_HISTORY_DAYS_FOR_EXPENSE_SUFFICIENCY: int = 60
+MIN_EXPENSE_EVENTS_FOR_SUFFICIENCY: int = 5
+
+
 class SpendingTrend(str, Enum):
     """Deterministic classification of recent 30-day vs previous 30-day spending velocity."""
     INCREASING = "increasing"          # Outflow increased by > 15%
@@ -53,18 +68,18 @@ class SpendingTrend(str, Enum):
 
 class IncomeStability(str, Enum):
     """Deterministic indicator of income reliability for future payment commitments."""
-    HIGH = "high"                      # Validated recurring income with high cadence/history
-    MODERATE = "moderate"              # Recurring income with shorter history or regular settled inflows
+    HIGH = "high"                      # Validated recurring income with high cadence/history (>=3 events)
+    MODERATE = "moderate"              # Validated recurring income (<3 events) OR statistical regular inflows
     LOW = "low"                        # Irregular, highly volatile, or sparse income
     INSUFFICIENT_DATA = "insufficient_data"  # Zero income records or insufficient history (<60d)
 
 
 class ExpenseStability(str, Enum):
     """Deterministic indicator of expense predictability versus discretionary volatility."""
-    HIGH = "high"                      # Recurring obligations dominate (>= 50% of budget)
-    MODERATE = "moderate"              # Balanced mix of recurring obligations and discretionary spending
+    HIGH = "high"                      # Recurring obligations dominate (>= 50% of monthly average outflow)
+    MODERATE = "moderate"              # Balanced mix of recurring obligations and discretionary spending (20%-50%)
     LOW = "low"                        # Discretionary/volatile spending dominates (< 20% recurring)
-    INSUFFICIENT_DATA = "insufficient_data"  # Insufficient history (< 30d)
+    INSUFFICIENT_DATA = "insufficient_data"  # Insufficient history (< 30d or 0 outflows)
 
 
 # Standard recognized essential expense categories
@@ -104,10 +119,11 @@ class UpcomingObligationSummary:
     category: str
     amount: Decimal
     currency: str
-    source_type: str  # 'forecast_recurrence' or 'canonical_scheduled'
+    source_type: str  # 'explicit_scheduled' or 'recurring_forecast'
     series_id: Optional[str]
     is_protected: bool
     flexibility: str
+    suppressed_forecast_event_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +147,7 @@ class UserFinancialState:
 
     # 2. Current Cash & Policy (As of request_date)
     current_available_balance: Decimal
+    projected_balance: Decimal
     safety_floor: Decimal
     minimum_balance_to_keep: Decimal
     pending_reserved_amount: Decimal
@@ -183,28 +200,29 @@ class UserFinancialState:
     upcoming_obligations_30d_total: Decimal
     upcoming_obligations_90d_total: Decimal
     upcoming_obligations: Tuple[UpcomingObligationSummary, ...]
+    suppressed_forecast_count: int = 0
 
     # 7. Behavioral & Stability Signals
-    spending_trend: SpendingTrend
-    spending_trend_percentage: Optional[Decimal]
-    income_stability: IncomeStability
-    expense_stability: ExpenseStability
+    spending_trend: SpendingTrend = SpendingTrend.STABLE
+    spending_trend_percentage: Optional[Decimal] = None
+    income_stability: IncomeStability = IncomeStability.INSUFFICIENT_DATA
+    expense_stability: ExpenseStability = ExpenseStability.INSUFFICIENT_DATA
 
     # 8. Data Sufficiency & Evidence Telemetry
-    history_days_available: int
-    total_historical_events_count: int
-    is_income_history_sufficient: bool
-    is_expense_history_sufficient: bool
-    has_unresolved_events: bool
-    unresolved_events_count: int
+    history_days_available: int = 0
+    total_historical_events_count: int = 0
+    is_income_history_sufficient: bool = False
+    is_expense_history_sufficient: bool = False
+    has_unresolved_events: bool = False
+    unresolved_events_count: int = 0
 
     # 9. User Preferences & Constraints
-    financial_priorities: Tuple[str, ...]
-    protected_categories: Tuple[str, ...]
-    willing_to_reduce_categories: Tuple[str, ...]
-    willing_to_stop_categories: Tuple[str, ...]
-    payment_methods_considered: Tuple[str, ...]
-    max_installment_months: Optional[int]
+    financial_priorities: Tuple[str, ...] = ()
+    protected_categories: Tuple[str, ...] = ()
+    willing_to_reduce_categories: Tuple[str, ...] = ()
+    willing_to_stop_categories: Tuple[str, ...] = ()
+    payment_methods_considered: Tuple[str, ...] = ()
+    max_installment_months: Optional[int] = None
 
 
 def compute_monthly_equivalent(amount: Decimal, freq: RecurrenceFrequency) -> Decimal:
@@ -221,6 +239,151 @@ def compute_monthly_equivalent(amount: Decimal, freq: RecurrenceFrequency) -> De
     if freq == RecurrenceFrequency.MONTHLY:
         return amount
     return amount
+
+
+def deduplicate_and_summarize_upcoming_obligations(
+    user_id: str,
+    request_date: date,
+    sim_end_date: date,
+    canonical_events: Sequence[CanonicalEvent],
+    future_events: Sequence[FutureEvent],
+    protected_categories: Sequence[str],
+) -> Tuple[Tuple[UpcomingObligationSummary, ...], Set[str]]:
+    """Deterministically deduplicate upcoming obligations across explicit scheduled and recurring forecasts.
+
+    Precedence & Identity Semantics:
+    1. Explicit authoritative scheduled events take precedence over recurrence forecasts.
+    2. A collision occurs when an explicit scheduled event and a recurring forecast share
+       the same user, category, and effective_date, or have an explicit lineage link (linked_event_id).
+    3. When a collision occurs, the forecast occurrence is suppressed and recorded.
+    4. If the explicit event is active (SCHEDULED_OUTFLOW), it is retained with source_type='explicit_scheduled'.
+    5. If the explicit event was cancelled (CANCELLED_IGNORED), the obligation is cancelled:
+       the forecast duplicate is suppressed, and the cancelled event is NOT emitted into active obligations.
+    6. Distinct categories on the same date (e.g. rent and utilities) never collide.
+    7. Multiple distinct events in the same category on the same date are matched 1-to-1 (exact amount first).
+
+    Returns:
+        (tuple of UpcomingObligationSummary, set of suppressed forecast event_ids)
+    """
+    prot_set = set(protected_categories)
+
+    # 1. Collect canonical events in window [request_date, sim_end_date] for this user
+    active_sched: List[CanonicalEvent] = []
+    cancelled_sched: List[CanonicalEvent] = []
+
+    for ce in canonical_events:
+        if ce.user_id != user_id or ce.effective_date < request_date or ce.effective_date > sim_end_date:
+            continue
+        # Active scheduled outflows
+        if ce.cash_impact_type == CashImpactType.SCHEDULED_OUTFLOW or (
+            ce.status == "scheduled" and ce.direction == Direction.OUTFLOW
+        ):
+            active_sched.append(ce)
+        # Cancelled events that were scheduled outflows
+        elif ce.cash_impact_type == CashImpactType.CANCELLED_IGNORED or ce.status == "cancelled":
+            if ce.direction_original.strip().lower() == "debit" or ce.direction == Direction.OUTFLOW:
+                cancelled_sched.append(ce)
+
+    # Sort canonical events deterministically
+    active_sched.sort(key=lambda ce: (ce.effective_date, ce.amount_home or Decimal("0"), ce.event_id))
+    cancelled_sched.sort(key=lambda ce: (ce.effective_date, ce.amount_home or Decimal("0"), ce.event_id))
+
+    # 2. Collect forecast future events in window [request_date, sim_end_date] for this user
+    forecast_outflows: List[FutureEvent] = [
+        fe for fe in future_events
+        if fe.user_id == user_id
+        and request_date <= fe.effective_date <= sim_end_date
+        and fe.direction == Direction.OUTFLOW
+    ]
+    forecast_outflows.sort(key=lambda fe: (fe.effective_date, fe.amount_home, fe.event_id))
+
+    suppressed_forecast_ids: Set[str] = set()
+    results: List[UpcomingObligationSummary] = []
+
+    # Map forecast events by (category, effective_date)
+    forecasts_by_cat_date: Dict[Tuple[str, date], List[FutureEvent]] = {}
+    for fe in forecast_outflows:
+        forecasts_by_cat_date.setdefault((fe.category, fe.effective_date), []).append(fe)
+
+    used_forecast_ids: Set[str] = set()
+
+    # Process cancelled explicit events first: they cancel matching forecast events
+    for ce in cancelled_sched:
+        key = (ce.category, ce.effective_date)
+        candidates = [fe for fe in forecasts_by_cat_date.get(key, []) if fe.event_id not in used_forecast_ids]
+        matched_fe = None
+        if ce.linked_event_id:
+            for cand in candidates:
+                if cand.series_id == ce.linked_event_id or cand.anchor_event_id == ce.linked_event_id:
+                    matched_fe = cand
+                    break
+        if not matched_fe and candidates:
+            ce_amt = ce.amount_home or Decimal("0")
+            exact = [fe for fe in candidates if fe.amount_home == ce_amt]
+            matched_fe = exact[0] if exact else min(candidates, key=lambda fe: abs(fe.amount_home - ce_amt))
+
+        if matched_fe:
+            used_forecast_ids.add(matched_fe.event_id)
+            suppressed_forecast_ids.add(matched_fe.event_id)
+            # Cancelled obligation: neither is added to active upcoming obligations
+
+    # Process active explicit scheduled events
+    for ce in active_sched:
+        key = (ce.category, ce.effective_date)
+        candidates = [fe for fe in forecasts_by_cat_date.get(key, []) if fe.event_id not in used_forecast_ids]
+        matched_fe = None
+        if ce.linked_event_id:
+            for cand in candidates:
+                if cand.series_id == ce.linked_event_id or cand.anchor_event_id == ce.linked_event_id:
+                    matched_fe = cand
+                    break
+        if not matched_fe and candidates:
+            ce_amt = ce.amount_home or Decimal("0")
+            exact = [fe for fe in candidates if fe.amount_home == ce_amt]
+            matched_fe = exact[0] if exact else min(candidates, key=lambda fe: abs(fe.amount_home - ce_amt))
+
+        suppressed_id = None
+        if matched_fe:
+            used_forecast_ids.add(matched_fe.event_id)
+            suppressed_forecast_ids.add(matched_fe.event_id)
+            suppressed_id = matched_fe.event_id
+
+        is_prot = (ce.category in prot_set)
+        amt = ce.amount_home if ce.amount_home is not None else Decimal("0.00")
+        results.append(UpcomingObligationSummary(
+            event_id=ce.event_id,
+            effective_date=ce.effective_date,
+            category=ce.category,
+            amount=amt,
+            currency=ce.home_currency,
+            source_type="explicit_scheduled",
+            series_id=None,
+            is_protected=is_prot,
+            flexibility=ce.flexibility,
+            suppressed_forecast_event_id=suppressed_id,
+        ))
+
+    # Add remaining non-suppressed forecast events
+    for fe in forecast_outflows:
+        if fe.event_id in used_forecast_ids:
+            continue
+        is_prot = fe.is_protected or (fe.category in prot_set)
+        results.append(UpcomingObligationSummary(
+            event_id=fe.event_id,
+            effective_date=fe.effective_date,
+            category=fe.category,
+            amount=fe.amount_home,
+            currency=fe.currency,
+            source_type="recurring_forecast",
+            series_id=fe.series_id,
+            is_protected=is_prot,
+            flexibility=fe.flexibility,
+            suppressed_forecast_event_id=None,
+        ))
+
+    # Sort final results deterministically
+    results.sort(key=lambda ob: (ob.effective_date, ob.amount, ob.category, ob.event_id))
+    return tuple(results), suppressed_forecast_ids
 
 
 def build_user_financial_state(
@@ -248,6 +411,11 @@ def build_user_financial_state(
     curr = profile.home_currency
     q = get_currency_quantum(curr)
 
+    # Sort all inputs deterministically to guarantee complete order-independence
+    canonical_events = sorted(canonical_events, key=lambda ce: (ce.effective_date, ce.source_row, ce.event_id))
+    future_events = sorted(future_events, key=lambda fe: (fe.effective_date, fe.event_id))
+    recurring_series = sorted(recurring_series, key=lambda s: s.series_id)
+
     # 1. User preferences & protection sets
     protected_categories = tuple(sorted(profile.expense_categories_to_protect))
     willing_to_reduce = tuple(sorted(profile.expense_categories_user_is_willing_to_reduce))
@@ -256,19 +424,22 @@ def build_user_financial_state(
 
     essential_categories_all = set(ESSENTIAL_EXPENSE_CATEGORIES) | set(protected_categories)
 
-    # 2. Current cash & liquidity reserves
+    # 2. Current cash & liquidity reserves directly derived from baseline_simulation
     init_state = baseline_simulation.initial_state
     current_avail_bal = profile.current_available_balance
     safety_floor = profile.minimum_balance_to_keep
     min_bal = profile.minimum_balance_to_keep
 
-    # Pending reserved amount captures holds from initial state or established on request_date
     today_snap = baseline_simulation.get_snapshot_for_date(req_d)
-    pending_reserved = init_state.reserved_pending
-    if today_snap and today_snap.closing_reserved_pending > pending_reserved:
+    if today_snap:
+        projected_bal = today_snap.closing_projected_balance
         pending_reserved = today_snap.closing_reserved_pending
+        available_cash = today_snap.closing_available_cash
+    else:
+        projected_bal = init_state.projected_balance
+        pending_reserved = init_state.reserved_pending
+        available_cash = init_state.available_cash
 
-    available_cash = current_avail_bal - pending_reserved
     current_headroom = max(Decimal("0.00"), available_cash - safety_floor)
 
     # 3. Filter historical events strictly before request_date (NO lookahead leakage)
@@ -292,12 +463,12 @@ def build_user_financial_state(
     w90_start = req_d - timedelta(days=90)
 
     # Inflow analysis
-    # Only settled or scheduled cash inflows with confirmed cash impact are realized
+    # Realized historical income requires strictly SETTLED cash inflows
     hist_inflows = [
         ce for ce in historical_events
         if ce.direction == Direction.INFLOW
         and ce.is_cash_event
-        and ce.cash_impact_type in (CashImpactType.SETTLED_INFLOW, CashImpactType.SCHEDULED_INFLOW)
+        and ce.cash_impact_type == CashImpactType.SETTLED_INFLOW
         and ce.amount_home is not None
         and ce.amount_home > Decimal("0")
     ]
@@ -325,7 +496,7 @@ def build_user_financial_state(
     monthly_avg_income_90d = (recent_90d_income / Decimal("3")).quantize(q, rounding=ROUND_HALF_UP)
 
     # Outflow analysis
-    # Only settled cash outflows represent realized historical spending
+    # Realized historical spending requires strictly SETTLED cash outflows
     hist_outflows = [
         ce for ce in historical_events
         if ce.direction == Direction.OUTFLOW
@@ -417,72 +588,33 @@ def build_user_financial_state(
     proj_outflows_90d = baseline_simulation.total_outflows
 
     # 6. Upcoming Obligations in the 90-day horizon [request_date, request_date + 90 days]
-    # Includes recurrence forecast outflows + canonical scheduled outflows
-    upcoming_obligations_list: List[UpcomingObligationSummary] = []
-    seen_ob_ids: Set[str] = set()
-
+    # Includes recurrence forecast outflows + canonical scheduled outflows with deduplication
     sim_end_date = req_d + timedelta(days=90)
     w30_future_limit = req_d + timedelta(days=30)
 
-    # From future recurrence forecast events
-    for fe in future_events:
-        if fe.user_id != request.user_id:
-            continue
-        if req_d <= fe.effective_date <= sim_end_date and fe.direction == Direction.OUTFLOW:
-            if fe.event_id in seen_ob_ids:
-                continue
-            seen_ob_ids.add(fe.event_id)
-            is_prot = fe.is_protected or (fe.category in protected_categories)
-            upcoming_obligations_list.append(UpcomingObligationSummary(
-                event_id=fe.event_id,
-                effective_date=fe.effective_date,
-                category=fe.category,
-                amount=fe.amount_home,
-                currency=fe.currency,
-                source_type="forecast_recurrence",
-                series_id=fe.series_id,
-                is_protected=is_prot,
-                flexibility=fe.flexibility,
-            ))
+    deduped_obs, suppressed_forecast_ids = deduplicate_and_summarize_upcoming_obligations(
+        user_id=request.user_id,
+        request_date=req_d,
+        sim_end_date=sim_end_date,
+        canonical_events=canonical_events,
+        future_events=future_events,
+        protected_categories=protected_categories,
+    )
 
-    # From canonical scheduled outflows
-    for ce in canonical_events:
-        if ce.user_id != request.user_id:
-            continue
-        if req_d <= ce.effective_date <= sim_end_date and ce.direction == Direction.OUTFLOW:
-            if ce.cash_impact_type == CashImpactType.SCHEDULED_OUTFLOW or ce.status == "scheduled":
-                if ce.event_id in seen_ob_ids:
-                    continue
-                seen_ob_ids.add(ce.event_id)
-                is_prot = ce.category in protected_categories
-                upcoming_obligations_list.append(UpcomingObligationSummary(
-                    event_id=ce.event_id,
-                    effective_date=ce.effective_date,
-                    category=ce.category,
-                    amount=ce.amount_home if ce.amount_home is not None else Decimal("0.00"),
-                    currency=ce.home_currency,
-                    source_type="canonical_scheduled",
-                    series_id=None,
-                    is_protected=is_prot,
-                    flexibility=ce.flexibility,
-                ))
-
-    # Sort obligations chronologically, then by event_id
-    upcoming_obligations_list.sort(key=lambda ob: (ob.effective_date, ob.event_id))
-
-    upcoming_count = len(upcoming_obligations_list)
+    upcoming_count = len(deduped_obs)
     upcoming_30d_tot = sum(
-        (ob.amount for ob in upcoming_obligations_list if ob.effective_date < w30_future_limit),
+        (ob.amount for ob in deduped_obs if ob.effective_date < w30_future_limit),
         Decimal("0.00"),
     )
     upcoming_90d_tot = sum(
-        (ob.amount for ob in upcoming_obligations_list),
+        (ob.amount for ob in deduped_obs),
         Decimal("0.00"),
     )
+    suppressed_count = len(suppressed_forecast_ids)
 
     # 7. Behavioral & Stability Signals
     # A. Spending Trend
-    if history_days < 60:
+    if history_days < MIN_HISTORY_DAYS_FOR_EXPENSE_SUFFICIENCY:
         spending_trend = SpendingTrend.INSUFFICIENT_DATA
         spending_trend_pct = None
     elif prev_30d_outflow == Decimal("0.00"):
@@ -496,29 +628,31 @@ def build_user_financial_state(
         diff = recent_30d_outflow - prev_30d_outflow
         ratio = diff / prev_30d_outflow
         spending_trend_pct = (ratio * Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        if ratio > Decimal("0.15"):
+        if ratio > SPENDING_TREND_THRESHOLD_RATIO:
             spending_trend = SpendingTrend.INCREASING
-        elif ratio < Decimal("-0.15"):
+        elif ratio < -SPENDING_TREND_THRESHOLD_RATIO:
             spending_trend = SpendingTrend.DECREASING
         else:
             spending_trend = SpendingTrend.STABLE
 
     # B. Income Stability
+    # HIGH: Validated recurring income with high cadence/history (>=3 historical occurrences)
+    # MODERATE: Validated recurring income with shorter history (<3 events) OR statistical regular inflows
+    # LOW: Irregular, volatile, or sparse income without recurring validation
+    # INSUFFICIENT_DATA: Less than 60 days of history or 0 income events
     if has_val_rec_income:
-        # Check cadence of primary recurring income series
         primary_inc = recurring_income_streams[0]
         rec_matches = [s for s in recurring_series if s.series_id == primary_inc.series_id]
         if rec_matches and rec_matches[0].historical_count >= 3:
             income_stability = IncomeStability.HIGH
         else:
             income_stability = IncomeStability.MODERATE
-    elif history_days < 60 or hist_income_count == 0:
+    elif history_days < MIN_HISTORY_DAYS_FOR_INCOME_SUFFICIENCY or hist_income_count == 0:
         income_stability = IncomeStability.INSUFFICIENT_DATA
     else:
-        # Evaluate 90d settled inflows
+        # Statistical check on settled 90d inflows (does not validate recurrence)
         inflows_90d = [ce.amount_home for ce in hist_inflows if w90_start <= ce.effective_date < req_d]
         if len(inflows_90d) >= 3:
-            # Check coefficient of variation
             mean_inc = sum(inflows_90d) / Decimal(len(inflows_90d))
             if mean_inc > Decimal("0"):
                 variance = sum(((amt - mean_inc) ** 2 for amt in inflows_90d)) / Decimal(len(inflows_90d))
@@ -536,6 +670,7 @@ def build_user_financial_state(
             income_stability = IncomeStability.INSUFFICIENT_DATA
 
     # C. Expense Stability
+    # Assesses predictability: High share of predictable recurring obligations vs discretionary volatility
     if history_days < 30 or len(hist_outflows) == 0:
         expense_stability = ExpenseStability.INSUFFICIENT_DATA
     elif monthly_avg_outflow_90d > Decimal("0.00"):
@@ -550,8 +685,14 @@ def build_user_financial_state(
         expense_stability = ExpenseStability.LOW
 
     # 8. Data Sufficiency Signals
-    is_inc_sufficient = history_days >= 60 and hist_income_count >= 1
-    is_exp_sufficient = history_days >= 60 and len(hist_outflows) >= 5
+    is_inc_sufficient = (
+        history_days >= MIN_HISTORY_DAYS_FOR_INCOME_SUFFICIENCY
+        and hist_income_count >= MIN_INCOME_EVENTS_FOR_SUFFICIENCY
+    )
+    is_exp_sufficient = (
+        history_days >= MIN_HISTORY_DAYS_FOR_EXPENSE_SUFFICIENCY
+        and len(hist_outflows) >= MIN_EXPENSE_EVENTS_FOR_SUFFICIENCY
+    )
 
     return UserFinancialState(
         request_id=request.request_id,
@@ -562,6 +703,7 @@ def build_user_financial_state(
         desired_completion_date=request.desired_completion_date,
         allows_partial_payment=request.allows_partial_payment,
         current_available_balance=current_avail_bal,
+        projected_balance=projected_bal,
         safety_floor=safety_floor,
         minimum_balance_to_keep=min_bal,
         pending_reserved_amount=pending_reserved,
@@ -600,7 +742,8 @@ def build_user_financial_state(
         upcoming_obligations_count=upcoming_count,
         upcoming_obligations_30d_total=upcoming_30d_tot,
         upcoming_obligations_90d_total=upcoming_90d_tot,
-        upcoming_obligations=tuple(upcoming_obligations_list),
+        upcoming_obligations=deduped_obs,
+        suppressed_forecast_count=suppressed_count,
         spending_trend=spending_trend,
         spending_trend_percentage=spending_trend_pct,
         income_stability=income_stability,
@@ -629,7 +772,7 @@ def evaluate_user_financial_state(
     """Convenience pipeline evaluator to construct UserFinancialState from the full ledger.
 
     Simulates the user baseline across [request_date, request_date + 90 days]
-    and extracts the unified immutable financial state.
+    and extracts the unified immutable financial state with deduplicated upcoming obligations.
     """
     uid = request.user_id
     req_d = request.request_date
@@ -640,12 +783,25 @@ def evaluate_user_financial_state(
 
     future_res = expand_future_events(user_series, req_d, sim_end, ledger=ledger)
 
+    # Deduplicate upcoming obligations to find any suppressed forecast duplicates
+    _, suppressed_ids = deduplicate_and_summarize_upcoming_obligations(
+        user_id=uid,
+        request_date=req_d,
+        sim_end_date=sim_end,
+        canonical_events=user_canonical,
+        future_events=future_res.future_events,
+        protected_categories=profile.expense_categories_to_protect,
+    )
+
+    # Filter out suppressed forecast events before running simulator to avoid duplicate cash deduction
+    sim_future_events = [fe for fe in future_res.future_events if fe.event_id not in suppressed_ids]
+
     baseline = simulate_user(
         user_id=uid,
         simulation_start=req_d,
         simulation_end=sim_end,
         canonical_events=user_canonical,
-        future_events=future_res.future_events,
+        future_events=sim_future_events,
         profile=profile,
     )
 

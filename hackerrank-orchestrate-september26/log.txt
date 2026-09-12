@@ -2877,5 +2877,62 @@ branch=master
 repo_root=c:\Users\Lenovo\Downloads\buy-or-wait\hackerrank-orchestrate-september26
 worktree=main
 parent_agent=none
+## [2026-09-13T00:20:00+05:30] User Financial State Correctness Audit & Hardening
 
+User Prompt (verbatim, secrets redacted):
+We are NOT moving to affordability/payment-method logic yet.
 
+The UserFinancialState implementation is structurally strong, but before freezing it we found several semantic issues that must be resolved.
+
+Do NOT implement:
+- affordability_status
+- recommended_payment_method
+- payment_plan
+- installments
+- partial payment
+- spending_changes_needed
+- ranking
+- LLM explanation
+- output.csv
+
+Do NOT redesign the entire state layer.
+This is a focused correctness audit.
+
+1. READ THE FROZEN FINANCIAL SEMANTICS FIRST
+2. CRITICAL: RESOLVE AVAILABLE-CASH SEMANTICS
+3. PENDING-DEBIT END-TO-END TEST
+4. CRITICAL: SCHEDULED EVENT + RECURRENCE DEDUPLICATION
+5. RECURRENCE AUTHORITY — NO SECOND RECURRENCE DETECTOR
+6. INCOME STABILITY HARDENING
+7. EXPENSE STABILITY HARDENING
+8. UPCOMING OBLIGATION SOURCE OF TRUTH
+9. BASELINE SIMULATOR INTEGRATION
+10. HISTORICAL STATISTICS — CURRENCY AND EVENT SEMANTICS
+11. NO DOUBLE COUNTING — COMPLETE MATRIX
+12. STATE SCHEMA AUDIT
+13. PREFERENCE FIELDS
+14. SPENDING TREND THRESHOLD AUDIT
+15. DATA-SUFFICIENCY AUDIT
+16. DETERMINISM / ORDER INDEPENDENCE
+17. REAL-DATA REGRESSION
+18. FULL TEST SUITE
+19. ARCHITECTURE PROTECTION
+20. STOP CONDITION
+
+Agent Response Summary:
+Completed focused correctness audit and mathematical hardening of UserFinancialState layer. Resolved available cash semantics: established that profile.current_available_balance is spendable available cash net of settled transactions, while pending holds are tracked in baseline simulator timeline (available_cash = projected_balance - pending_reserved_amount). Implemented deterministic deduplication between explicit scheduled canonical events and recurring forecast occurrences (deduplicate_and_summarize_upcoming_obligations), guaranteeing 1-to-1 matching, explicit precedence, cancellation suppression, and audit logging of suppressed forecast IDs without double simulation. Enforced strict recurrence authority (only recurrence.py validates recurring series; historical activity and CV consistency strictly provide statistical stability indicators). Centrally parameterized spending trend thresholds (±15%) and data sufficiency requirements (60d history, 1+ income, 5+ expenses). Added comprehensive unit tests 18-27 in code/tests/test_user_state.py covering the complete no-double-counting matrix, pending debit end-to-end settlement, boundary tests, synthetic sparse users, and order independence. Verified 175 tests passing in 0.536s. Re-audited all 250 evaluation requests in code/tests/smoke_test_user_state.py with zero failures.
+
+Actions:
+* updated code/user_state.py adding deduplicate_and_summarize_upcoming_obligations, projected_balance, suppressed_forecast_count, suppressed_forecast_event_id, and policy constants
+* updated code/__init__.py exporting deduplicate_and_summarize_upcoming_obligations and threshold constants
+* updated code/tests/test_user_state.py adding 10 focused tests (tests 18-27) covering available cash interpretations, pending debit lifecycle, scheduled vs recurrence deduplication, recurrence authority, complete double-counting matrix, threshold boundaries, and order independence
+* updated code/tests/smoke_test_user_state.py to display projected_balance and suppressed duplicate count
+* verified all 175 unit tests pass in 0.536s
+* validated real-data execution across all 250 requests with zero failures in 10.45s
+
+Context:
+tool=Antigravity
+branch=master
+repo_root=c:\Users\Lenovo\Downloads\buy-or-wait\hackerrank-orchestrate-september26
+worktree=main
+parent_agent=none
