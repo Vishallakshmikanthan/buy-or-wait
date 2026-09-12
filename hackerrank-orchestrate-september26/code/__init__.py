@@ -59,6 +59,19 @@ from .loaders import (
     load_images,
     load_requests,
 )
+from .simulator import (
+    EventPriority,
+    SimulatedEvent,
+    FinancialState,
+    EventTransition,
+    SafetyFloorBreach,
+    DailySnapshot,
+    SimulationResult,
+    create_initial_state,
+    simulate_user,
+    simulated_event_from_canonical,
+    simulated_event_from_future,
+)
 
 __all__ = [
     "FinancialProfile",
@@ -107,4 +120,16 @@ __all__ = [
     "load_messages",
     "load_images",
     "load_requests",
+    "EventPriority",
+    "SimulatedEvent",
+    "FinancialState",
+    "EventTransition",
+    "SafetyFloorBreach",
+    "DailySnapshot",
+    "SimulationResult",
+    "create_initial_state",
+    "simulate_user",
+    "simulated_event_from_canonical",
+    "simulated_event_from_future",
 ]
+
