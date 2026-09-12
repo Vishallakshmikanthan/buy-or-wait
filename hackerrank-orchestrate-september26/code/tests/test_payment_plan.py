@@ -1545,6 +1545,228 @@ class TestPaymentPlanContractBoundaryAuditPrompt9C(unittest.TestCase):
         self.assertEqual(res1.is_safe, res2.is_safe)
 
 
+class TestPaymentPlanDesiredCompletionDateSemanticsAuditPrompt9D(unittest.TestCase):
+    """Definitive contractual audit tests for desired_completion_date semantics (Prompt 9D).
+
+    Verifies the specification hierarchy:
+    - 90-day forecast horizon is the hard simulation limit (problem_statement.md line 178).
+    - max_installment_months is the hard duration limit (AGENTS.md line 186).
+    - desired_completion_date is the #1 ranking criterion among safe plans (problem_statement.md line 191; AGENTS.md line 215).
+    - An otherwise valid and safe plan completing after desired_completion_date but within 90 days
+      remains eligible and safe during payment option feasibility evaluation.
+    """
+
+    def setUp(self) -> None:
+        self.profile = make_profile(
+            available_balance=Decimal("5000.00"),
+            minimum_balance=Decimal("1000.00"),
+            max_installment_months=6,  # 6 calendar months (limit ~2026-07-01, well beyond 90 days)
+        )
+        self.request_date = date(2026, 1, 1)      # Day 0
+        self.desired_date = date(2026, 2, 15)     # Day 45
+        self.horizon_date = date(2026, 4, 1)      # Day 90 (2026-01-01 + 90 days)
+        self.base_request = make_request(
+            request_date=self.request_date,
+            desired_completion_date=self.desired_date,
+            requested_amount=Decimal("1200.00"),
+        )
+
+    def _make_two_payment_option(self, last_payment_date: date, opt_id: str = "opt_test") -> PaymentOption:
+        freq = (last_payment_date - self.request_date).days
+        return PaymentOption(
+            payment_option_id=opt_id,
+            request_id=self.base_request.request_id,
+            payment_method="installments",
+            payment_amount=Decimal("600.00"),
+            number_of_payments=2,
+            first_payment_date=self.request_date,
+            payment_frequency_days=freq,
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("1200.00"),
+        )
+
+    # -------------------------------------------------------------------------
+    # Required Cases 1 through 10
+    # -------------------------------------------------------------------------
+
+    def test_case_1_finish_before_deadline(self) -> None:
+        """1. Finish before deadline: last payment on D + 30 < desired D + 45."""
+        last_date = self.request_date + timedelta(days=30)  # 2026-01-31
+        opt = self._make_two_payment_option(last_date, "opt_case1")
+        res = evaluate_payment_option_feasibility(opt, self.base_request, self.profile, (), ())
+        self.assertTrue(res.is_eligible)
+        self.assertTrue(res.is_safe)
+        self.assertTrue(res.has_valid_plan)
+        self.assertLess(res.payment_plan.last_payment_date, self.desired_date)
+
+    def test_case_2_finish_exactly_deadline(self) -> None:
+        """2. Finish exactly deadline: last payment on D + 45 == desired D + 45."""
+        last_date = self.desired_date  # 2026-02-15
+        opt = self._make_two_payment_option(last_date, "opt_case2")
+        res = evaluate_payment_option_feasibility(opt, self.base_request, self.profile, (), ())
+        self.assertTrue(res.is_eligible)
+        self.assertTrue(res.is_safe)
+        self.assertTrue(res.has_valid_plan)
+        self.assertEqual(res.payment_plan.last_payment_date, self.desired_date)
+
+    def test_case_3_finish_one_day_after_deadline(self) -> None:
+        """3. Finish one day after deadline: last payment on D + 46 (desired D + 45).
+        Specification proves: Remains eligible and safe in feasibility; discriminated only in ranking.
+        """
+        last_date = self.desired_date + timedelta(days=1)  # 2026-02-16
+        opt = self._make_two_payment_option(last_date, "opt_case3")
+        res = evaluate_payment_option_feasibility(opt, self.base_request, self.profile, (), ())
+        self.assertTrue(res.is_eligible)
+        self.assertTrue(res.is_safe)
+        self.assertTrue(res.has_valid_plan)
+        self.assertEqual(res.payment_plan.last_payment_date, self.desired_date + timedelta(days=1))
+
+    def test_case_4_finish_well_after_deadline_but_inside_90_days(self) -> None:
+        """4. Finish well after deadline but inside 90 days: last payment on D + 60 (desired D + 45, horizon D + 90)."""
+        last_date = self.request_date + timedelta(days=60)  # 2026-03-02
+        opt = self._make_two_payment_option(last_date, "opt_case4")
+        res = evaluate_payment_option_feasibility(opt, self.base_request, self.profile, (), ())
+        self.assertTrue(res.is_eligible)
+        self.assertTrue(res.is_safe)
+        self.assertTrue(res.has_valid_plan)
+        self.assertGreater(res.payment_plan.last_payment_date, self.desired_date)
+        self.assertLess(res.payment_plan.last_payment_date, self.horizon_date)
+
+    def test_case_5_finish_exactly_day_90(self) -> None:
+        """5. Finish exactly day 90: last payment on D + 90 == horizon boundary."""
+        last_date = self.horizon_date  # 2026-04-01
+        opt = self._make_two_payment_option(last_date, "opt_case5")
+        res = evaluate_payment_option_feasibility(opt, self.base_request, self.profile, (), ())
+        self.assertTrue(res.is_eligible)
+        self.assertTrue(res.is_safe)
+        self.assertTrue(res.has_valid_plan)
+        self.assertEqual(res.payment_plan.last_payment_date, self.horizon_date)
+
+    def test_case_6_finish_after_day_90(self) -> None:
+        """6. Finish after day 90: last payment on D + 91 > horizon boundary.
+        Specification proves: Hard rejection because safety cannot be simulated beyond 90 days.
+        """
+        last_date = self.horizon_date + timedelta(days=1)  # 2026-04-02
+        opt = self._make_two_payment_option(last_date, "opt_case6")
+        res = evaluate_payment_option_feasibility(opt, self.base_request, self.profile, (), ())
+        self.assertFalse(res.is_eligible)
+        self.assertFalse(res.is_safe)
+        self.assertIn("payment schedule outside allowed horizon", res.rejection_reason)
+
+    def test_case_7_deadline_before_first_payment(self) -> None:
+        """7. Deadline before first payment: desired date precedes first payment date."""
+        req_early_deadline = make_request(
+            request_date=self.request_date,
+            desired_completion_date=date(2025, 12, 25),  # before first payment 2026-01-01
+            requested_amount=Decimal("1200.00"),
+        )
+        opt = self._make_two_payment_option(self.request_date + timedelta(days=30), "opt_case7")
+        res = evaluate_payment_option_feasibility(opt, req_early_deadline, self.profile, (), ())
+        self.assertTrue(res.is_eligible)
+        self.assertTrue(res.is_safe)
+        self.assertTrue(res.has_valid_plan)
+
+    def test_case_8_deadline_after_last_payment(self) -> None:
+        """8. Deadline after last payment: last payment D + 30, desired D + 60."""
+        req_late_deadline = make_request(
+            request_date=self.request_date,
+            desired_completion_date=self.request_date + timedelta(days=60),
+            requested_amount=Decimal("1200.00"),
+        )
+        opt = self._make_two_payment_option(self.request_date + timedelta(days=30), "opt_case8")
+        res = evaluate_payment_option_feasibility(opt, req_late_deadline, self.profile, (), ())
+        self.assertTrue(res.is_eligible)
+        self.assertTrue(res.is_safe)
+        self.assertTrue(res.has_valid_plan)
+        self.assertLess(res.payment_plan.last_payment_date, req_late_deadline.desired_completion_date)
+
+    def test_case_9_deadline_beyond_90_days(self) -> None:
+        """9. Deadline beyond 90 days: desired date D + 120, last payment D + 60."""
+        req_beyond_90 = make_request(
+            request_date=self.request_date,
+            desired_completion_date=self.request_date + timedelta(days=120),
+            requested_amount=Decimal("1200.00"),
+        )
+        opt = self._make_two_payment_option(self.request_date + timedelta(days=60), "opt_case9")
+        res = evaluate_payment_option_feasibility(opt, req_beyond_90, self.profile, (), ())
+        self.assertTrue(res.is_eligible)
+        self.assertTrue(res.is_safe)
+        self.assertTrue(res.has_valid_plan)
+
+    def test_case_10_deterministic_repeated_evaluation(self) -> None:
+        """10. Deterministic repeated evaluation: repeated calls yield strictly bitwise-identical results."""
+        opt = self._make_two_payment_option(self.request_date + timedelta(days=46), "opt_case10")
+        results = [
+            evaluate_payment_option_feasibility(opt, self.base_request, self.profile, (), ())
+            for _ in range(10)
+        ]
+        first = results[0]
+        for idx, r in enumerate(results[1:], start=1):
+            self.assertEqual(r.is_eligible, first.is_eligible, f"Run {idx} eligibility mismatch")
+            self.assertEqual(r.is_safe, first.is_safe, f"Run {idx} safety mismatch")
+            self.assertEqual(r.rejection_reason, first.rejection_reason, f"Run {idx} reason mismatch")
+            self.assertEqual(r.minimum_available_cash, first.minimum_available_cash, f"Run {idx} cash mismatch")
+            self.assertEqual(r.safety_floor, first.safety_floor, f"Run {idx} floor mismatch")
+            self.assertEqual(r.limiting_date, first.limiting_date, f"Run {idx} limiting date mismatch")
+
+    # -------------------------------------------------------------------------
+    # Property Tests C and D
+    # -------------------------------------------------------------------------
+
+    def test_property_c_changing_desired_completion_date_preserves_feasibility_and_safety(self) -> None:
+        """PROPERTY C: Changing desired_completion_date must not change feasibility or safety of an otherwise identical plan."""
+        opt = self._make_two_payment_option(self.request_date + timedelta(days=46), "opt_prop_c")
+
+        # Test across 5 distinct desired_completion_dates (before fp, before lp, on lp, after lp, beyond 90d)
+        dates = [
+            self.request_date - timedelta(days=5),
+            self.request_date + timedelta(days=20),
+            self.request_date + timedelta(days=46),
+            self.request_date + timedelta(days=70),
+            self.request_date + timedelta(days=120),
+        ]
+        baseline = None
+        for d in dates:
+            req = make_request(request_date=self.request_date, desired_completion_date=d)
+            res = evaluate_payment_option_feasibility(opt, req, self.profile, (), ())
+            if baseline is None:
+                baseline = res
+            else:
+                self.assertEqual(res.is_eligible, baseline.is_eligible)
+                self.assertEqual(res.is_safe, baseline.is_safe)
+                self.assertEqual(res.rejection_reason, baseline.rejection_reason)
+                self.assertEqual(res.minimum_available_cash, baseline.minimum_available_cash)
+                self.assertEqual(res.safety_floor, baseline.safety_floor)
+                self.assertEqual(res.limiting_date, baseline.limiting_date)
+
+    def test_property_d_changing_desired_completion_date_preserves_cash_flow_trajectory(self) -> None:
+        """PROPERTY D: Changing desired_completion_date may alter ranking priority, but cannot alter underlying cash-flow safety."""
+        # Unsafe option due to cash shortage
+        opt_expensive = PaymentOption(
+            payment_option_id="opt_exp",
+            request_id=self.base_request.request_id,
+            payment_method="installments",
+            payment_amount=Decimal("3000.00"),  # 2 * 3000 = 6000 > 5000 - 1000 = 4000
+            number_of_payments=2,
+            first_payment_date=self.request_date,
+            payment_frequency_days=30,
+            financing_fee=Decimal("0.00"),
+            total_payable_amount=Decimal("6000.00"),
+        )
+        req1 = make_request(request_date=self.request_date, desired_completion_date=date(2026, 1, 15))
+        req2 = make_request(request_date=self.request_date, desired_completion_date=date(2026, 3, 30))
+
+        res1 = evaluate_payment_option_feasibility(opt_expensive, req1, self.profile, (), ())
+        res2 = evaluate_payment_option_feasibility(opt_expensive, req2, self.profile, (), ())
+
+        self.assertTrue(res1.is_eligible)
+        self.assertFalse(res1.is_safe)
+        self.assertTrue(res2.is_eligible)
+        self.assertFalse(res2.is_safe)
+        self.assertEqual(res1.minimum_available_cash, res2.minimum_available_cash)
+        self.assertEqual(res1.rejection_reason, res2.rejection_reason)
+
+
 if __name__ == "__main__":
     unittest.main()
 
