@@ -1621,6 +1621,262 @@ class TestCertificateCorrectnessAudit(unittest.TestCase):
         self.assertIn("Full payment would breach safety floor", cert.reason_if_unsafe)
 
 
+class TestSameDayOrderingAndCandidateSemantics(unittest.TestCase):
+    """Forensic verification of intra-day event ordering and candidate purchase semantics."""
+
+    def setUp(self) -> None:
+        self.uid = "u_forensic_order"
+        self.req_d = date(2025, 1, 1)
+        self.prof = FinancialProfile(
+            user_id=self.uid, home_currency="USD", current_available_balance=Decimal("1000.00"),
+            minimum_balance_to_keep=Decimal("200.00"), financial_priorities=(), expense_categories_to_protect=(),
+            expense_categories_user_is_willing_to_reduce=(), expense_categories_user_is_willing_to_stop=(),
+            payment_methods_user_will_consider=("full_payment",), max_installment_months=None,
+        )
+        self.req = FinancialRequest(
+            request_id="req_order", user_id=self.uid, request_date=self.req_d, request_type="purchase",
+            requested_amount=Decimal("500.00"), desired_completion_date=self.req_d + timedelta(days=30),
+            allows_partial_payment=True, request_text="Order test",
+        )
+
+    def _make_ce(self, eid: str, direction: Direction, amt: Decimal, impact: CashImpactType) -> CanonicalEvent:
+        return CanonicalEvent(
+            event_id=eid, user_id=self.uid, source_row=1, effective_date=self.req_d,
+            direction=direction, direction_original=direction.value, amount_original=amt,
+            currency_original="USD", amount_home=amt, home_currency="USD", exchange_rate_used=Decimal("1"),
+            exchange_rate_date=self.req_d, status="settled" if impact != CashImpactType.PENDING_DEBIT_RESERVED else "pending",
+            is_cash_event=True, cash_impact_type=impact, event_type="income" if direction == Direction.INFLOW else "expense",
+            category="salary" if direction == Direction.INFLOW else "bills", description=eid, flexibility="fixed",
+            minimum_allowed_amount_original=None, minimum_allowed_amount_home=None, linked_event_id=None,
+            recurrence_type=RecurrenceClassification.UNKNOWN, is_unresolved=False, unresolved_reason=None,
+            evidence_chain=(), applied_actions=(),
+        )
+
+    def test_case_A_salary_plus_candidate(self) -> None:
+        """A. salary + candidate: Salary executes first (P0), then candidate purchase (P3)."""
+        sal = self._make_ce("sal_1", Direction.INFLOW, Decimal("400.00"), CashImpactType.SCHEDULED_INFLOW)
+        base = simulate_user(self.uid, self.req_d, self.req_d + timedelta(days=90), canonical_events=[sal], profile=self.prof)
+        cert = evaluate_request_safe_to_pay(self.req, base, [sal], [], self.prof)
+
+        # Opening 1000 + 400 salary = 1400. Floor 200 -> Headroom 1200. Requested 500 is fully safe.
+        self.assertEqual(cert.amount_safe_to_pay, Decimal("500.00"))
+        self.assertTrue(cert.is_full_payment_safe_today)
+
+        cand = make_candidate_purchase_event(self.req, Decimal("500.00"), self.req_d, "USD")
+        sim = simulate_user(self.uid, self.req_d, self.req_d + timedelta(days=90), canonical_events=[sal], profile=self.prof, additional_events=[cand])
+        trans = [t for t in sim.event_transitions if t.date == self.req_d]
+        self.assertEqual([t.event_id for t in trans], ["sal_1", cand.event_id])
+        self.assertEqual(trans[0].available_after, Decimal("1400.00"))
+        self.assertEqual(trans[1].available_after, Decimal("900.00"))
+
+    def test_case_B_pending_hold_plus_candidate(self) -> None:
+        """B. pending hold + candidate: Hold reserves cash first (P1), then candidate purchase (P3)."""
+        hold = self._make_ce("hold_1", Direction.OUTFLOW, Decimal("300.00"), CashImpactType.PENDING_DEBIT_RESERVED)
+        base = simulate_user(self.uid, self.req_d, self.req_d + timedelta(days=90), canonical_events=[hold], profile=self.prof)
+        cert = evaluate_request_safe_to_pay(self.req, base, [hold], [], self.prof)
+
+        # Opening 1000 - 300 hold = 700. Floor 200 -> Headroom 500. Requested 500 is exactly safe.
+        self.assertEqual(cert.amount_safe_to_pay, Decimal("500.00"))
+        self.assertTrue(cert.is_full_payment_safe_today)
+
+        cand = make_candidate_purchase_event(self.req, Decimal("500.00"), self.req_d, "USD")
+        sim = simulate_user(self.uid, self.req_d, self.req_d + timedelta(days=90), canonical_events=[hold], profile=self.prof, additional_events=[cand])
+        trans = [t for t in sim.event_transitions if t.date == self.req_d]
+        self.assertEqual([t.event_id for t in trans], ["hold_1", cand.event_id])
+        self.assertEqual(trans[0].available_after, Decimal("700.00"))
+        self.assertEqual(trans[1].available_after, Decimal("200.00"))
+
+    def test_case_C_scheduled_obligation_plus_candidate(self) -> None:
+        """C. scheduled obligation + candidate: Scheduled obligation executes first (P2), then candidate purchase (P3)."""
+        ob = self._make_ce("ob_1", Direction.OUTFLOW, Decimal("400.00"), CashImpactType.SCHEDULED_OUTFLOW)
+        base = simulate_user(self.uid, self.req_d, self.req_d + timedelta(days=90), canonical_events=[ob], profile=self.prof)
+        cert = evaluate_request_safe_to_pay(self.req, base, [ob], [], self.prof)
+
+        # Opening 1000 - 400 ob = 600. Floor 200 -> Headroom 400. Safe amount = 400.
+        self.assertEqual(cert.amount_safe_to_pay, Decimal("400.00"))
+        self.assertFalse(cert.is_full_payment_safe_today)
+
+        cand = make_candidate_purchase_event(self.req, Decimal("400.00"), self.req_d, "USD")
+        sim = simulate_user(self.uid, self.req_d, self.req_d + timedelta(days=90), canonical_events=[ob], profile=self.prof, additional_events=[cand])
+        trans = [t for t in sim.event_transitions if t.date == self.req_d]
+        self.assertEqual([t.event_id for t in trans], ["ob_1", cand.event_id])
+        self.assertEqual(trans[0].available_after, Decimal("600.00"))
+        self.assertEqual(trans[1].available_after, Decimal("200.00"))
+
+    def test_case_D_salary_plus_obligation_plus_candidate(self) -> None:
+        """D. salary + obligation + candidate: Ordering is strictly Salary (P0) -> Obligation (P2) -> Candidate (P3)."""
+        sal = self._make_ce("sal_1", Direction.INFLOW, Decimal("500.00"), CashImpactType.SCHEDULED_INFLOW)
+        ob = self._make_ce("ob_1", Direction.OUTFLOW, Decimal("600.00"), CashImpactType.SCHEDULED_OUTFLOW)
+        base = simulate_user(self.uid, self.req_d, self.req_d + timedelta(days=90), canonical_events=[sal, ob], profile=self.prof)
+        cert = evaluate_request_safe_to_pay(self.req, base, [sal, ob], [], self.prof)
+
+        # Opening 1000 + 500 - 600 = 900. Floor 200 -> Headroom 700. Requested 500 safe.
+        self.assertEqual(cert.amount_safe_to_pay, Decimal("500.00"))
+
+        cand = make_candidate_purchase_event(self.req, Decimal("500.00"), self.req_d, "USD")
+        sim = simulate_user(self.uid, self.req_d, self.req_d + timedelta(days=90), canonical_events=[sal, ob], profile=self.prof, additional_events=[cand])
+        trans = [t for t in sim.event_transitions if t.date == self.req_d]
+        self.assertEqual([t.event_id for t in trans], ["sal_1", "ob_1", cand.event_id])
+        self.assertEqual(trans[0].available_after, Decimal("1500.00"))
+        self.assertEqual(trans[1].available_after, Decimal("900.00"))
+        self.assertEqual(trans[2].available_after, Decimal("400.00"))
+
+    def test_case_E_pending_hold_plus_obligation_plus_candidate(self) -> None:
+        """E. pending hold + obligation + candidate: Hold (P1) -> Obligation (P2) -> Candidate (P3)."""
+        hold = self._make_ce("hold_1", Direction.OUTFLOW, Decimal("200.00"), CashImpactType.PENDING_DEBIT_RESERVED)
+        ob = self._make_ce("ob_1", Direction.OUTFLOW, Decimal("300.00"), CashImpactType.SCHEDULED_OUTFLOW)
+        base = simulate_user(self.uid, self.req_d, self.req_d + timedelta(days=90), canonical_events=[hold, ob], profile=self.prof)
+        cert = evaluate_request_safe_to_pay(self.req, base, [hold, ob], [], self.prof)
+
+        # Opening 1000 - 200 hold - 300 ob = 500. Floor 200 -> Headroom 300. Safe amount = 300.
+        self.assertEqual(cert.amount_safe_to_pay, Decimal("300.00"))
+
+        cand = make_candidate_purchase_event(self.req, Decimal("300.00"), self.req_d, "USD")
+        sim = simulate_user(self.uid, self.req_d, self.req_d + timedelta(days=90), canonical_events=[hold, ob], profile=self.prof, additional_events=[cand])
+        trans = [t for t in sim.event_transitions if t.date == self.req_d]
+        self.assertEqual([t.event_id for t in trans], ["hold_1", "ob_1", cand.event_id])
+        self.assertEqual(trans[0].available_after, Decimal("800.00"))
+        self.assertEqual(trans[1].available_after, Decimal("500.00"))
+        self.assertEqual(trans[2].available_after, Decimal("200.00"))
+
+    def test_case_F_multiple_scheduled_obligations_plus_candidate(self) -> None:
+        """F. multiple scheduled obligations + candidate: All obligations execute before candidate."""
+        ob1 = self._make_ce("ob_1", Direction.OUTFLOW, Decimal("150.00"), CashImpactType.SCHEDULED_OUTFLOW)
+        ob2 = self._make_ce("ob_2", Direction.OUTFLOW, Decimal("250.00"), CashImpactType.SCHEDULED_OUTFLOW)
+        base = simulate_user(self.uid, self.req_d, self.req_d + timedelta(days=90), canonical_events=[ob1, ob2], profile=self.prof)
+        cert = evaluate_request_safe_to_pay(self.req, base, [ob1, ob2], [], self.prof)
+
+        # 1000 - 400 = 600. Floor 200 -> Headroom 400.
+        self.assertEqual(cert.amount_safe_to_pay, Decimal("400.00"))
+
+        cand = make_candidate_purchase_event(self.req, Decimal("400.00"), self.req_d, "USD")
+        sim = simulate_user(self.uid, self.req_d, self.req_d + timedelta(days=90), canonical_events=[ob1, ob2], profile=self.prof, additional_events=[cand])
+        trans = [t for t in sim.event_transitions if t.date == self.req_d]
+        self.assertEqual([t.event_id for t in trans], ["ob_1", "ob_2", cand.event_id])
+
+    def test_case_G_multiple_same_day_events_plus_candidate(self) -> None:
+        """G. full spectrum: Salary (P0) -> Hold (P1) -> Obligation (P2) -> Candidate (P3)."""
+        sal = self._make_ce("sal_1", Direction.INFLOW, Decimal("500.00"), CashImpactType.SCHEDULED_INFLOW)
+        hold = self._make_ce("hold_1", Direction.OUTFLOW, Decimal("100.00"), CashImpactType.PENDING_DEBIT_RESERVED)
+        ob = self._make_ce("ob_1", Direction.OUTFLOW, Decimal("300.00"), CashImpactType.SCHEDULED_OUTFLOW)
+        base = simulate_user(self.uid, self.req_d, self.req_d + timedelta(days=90), canonical_events=[sal, hold, ob], profile=self.prof)
+        cert = evaluate_request_safe_to_pay(self.req, base, [sal, hold, ob], [], self.prof)
+
+        # 1000 + 500 - 100 - 300 = 1100. Floor 200 -> Headroom 900. Requested 500 safe.
+        self.assertEqual(cert.amount_safe_to_pay, Decimal("500.00"))
+
+        cand = make_candidate_purchase_event(self.req, Decimal("500.00"), self.req_d, "USD")
+        sim = simulate_user(self.uid, self.req_d, self.req_d + timedelta(days=90), canonical_events=[sal, hold, ob], profile=self.prof, additional_events=[cand])
+        trans = [t for t in sim.event_transitions if t.date == self.req_d]
+        self.assertEqual([t.event_id for t in trans], ["sal_1", "hold_1", "ob_1", cand.event_id])
+
+    def test_case_H_tight_safety_floor_boundary(self) -> None:
+        """H. tight safety floor boundary: Headroom is very tight (e.g. $10.00)."""
+        ob = self._make_ce("ob_1", Direction.OUTFLOW, Decimal("790.00"), CashImpactType.SCHEDULED_OUTFLOW)
+        base = simulate_user(self.uid, self.req_d, self.req_d + timedelta(days=90), canonical_events=[ob], profile=self.prof)
+        cert = evaluate_request_safe_to_pay(self.req, base, [ob], [], self.prof)
+
+        # 1000 - 790 = 210. Floor 200 -> Headroom 10.
+        self.assertEqual(cert.amount_safe_to_pay, Decimal("10.00"))
+        self.assertEqual(cert.safety_floor_margin, Decimal("0.00"))
+
+    def test_case_I_exact_equality_with_safety_floor(self) -> None:
+        """I. exact equality: Available cash exactly equals safety floor."""
+        ob = self._make_ce("ob_1", Direction.OUTFLOW, Decimal("800.00"), CashImpactType.SCHEDULED_OUTFLOW)
+        base = simulate_user(self.uid, self.req_d, self.req_d + timedelta(days=90), canonical_events=[ob], profile=self.prof)
+        cert = evaluate_request_safe_to_pay(self.req, base, [ob], [], self.prof)
+
+        # 1000 - 800 = 200. Floor 200 -> Headroom 0. Safe amount = 0.
+        self.assertEqual(cert.amount_safe_to_pay, Decimal("0.00"))
+        self.assertFalse(cert.is_full_payment_safe_today)
+
+    def test_case_J_one_cent_above_safety_floor(self) -> None:
+        """J. one-cent above: Headroom is exactly $0.01."""
+        ob = self._make_ce("ob_1", Direction.OUTFLOW, Decimal("799.99"), CashImpactType.SCHEDULED_OUTFLOW)
+        base = simulate_user(self.uid, self.req_d, self.req_d + timedelta(days=90), canonical_events=[ob], profile=self.prof)
+        cert = evaluate_request_safe_to_pay(self.req, base, [ob], [], self.prof)
+
+        # 1000 - 799.99 = 200.01. Floor 200 -> Headroom 0.01.
+        self.assertEqual(cert.amount_safe_to_pay, Decimal("0.01"))
+
+    def test_case_K_candidate_amount_zero(self) -> None:
+        """K. candidate amount = 0: Zero purchase is always safe if baseline is safe."""
+        cand_zero = make_candidate_purchase_event(self.req, Decimal("0.00"), self.req_d, "USD")
+        safe, res = is_purchase_safe(self.uid, self.req_d, self.req_d + timedelta(days=90), [], [], self.prof, cand_zero)
+        self.assertTrue(safe)
+        self.assertEqual(res.minimum_projected_available_cash, Decimal("1000.00"))
+
+    def test_case_L_candidate_amount_requested_amount(self) -> None:
+        """L. candidate amount = requested amount: Evaluates full amount safety predicate."""
+        cand_full = make_candidate_purchase_event(self.req, Decimal("500.00"), self.req_d, "USD")
+        safe, res = is_purchase_safe(self.uid, self.req_d, self.req_d + timedelta(days=90), [], [], self.prof, cand_full)
+        self.assertTrue(safe)
+        self.assertEqual(res.minimum_projected_available_cash, Decimal("500.00"))
+
+
+class TestCandidateOrderIndependence(unittest.TestCase):
+    """Exhaustive verification that candidate purchase event ID never alters safe-to-pay results."""
+
+    def test_event_id_order_independence(self) -> None:
+        uid = "u_order_indep"
+        req_d = date(2025, 1, 1)
+        prof = FinancialProfile(
+            user_id=uid, home_currency="USD", current_available_balance=Decimal("1200.00"),
+            minimum_balance_to_keep=Decimal("300.00"), financial_priorities=(), expense_categories_to_protect=(),
+            expense_categories_user_is_willing_to_reduce=(), expense_categories_user_is_willing_to_stop=(),
+            payment_methods_user_will_consider=("full_payment",), max_installment_months=None,
+        )
+        req = FinancialRequest(
+            request_id="req_indep", user_id=uid, request_date=req_d, request_type="purchase",
+            requested_amount=Decimal("600.00"), desired_completion_date=req_d + timedelta(days=30),
+            allows_partial_payment=True, request_text="Indep test",
+        )
+        ob1 = CanonicalEvent(
+            event_id="bill_electricity", user_id=uid, source_row=1, effective_date=req_d,
+            direction=Direction.OUTFLOW, direction_original="outflow", amount_original=Decimal("200.00"),
+            currency_original="USD", amount_home=Decimal("200.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=req_d, status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SCHEDULED_OUTFLOW, event_type="expense",
+            category="utilities", description="Electricity", flexibility="fixed",
+            minimum_allowed_amount_original=None, minimum_allowed_amount_home=None, linked_event_id=None,
+            recurrence_type=RecurrenceClassification.UNKNOWN, is_unresolved=False, unresolved_reason=None,
+            evidence_chain=(), applied_actions=(),
+        )
+        ob2 = CanonicalEvent(
+            event_id="rent_apartment", user_id=uid, source_row=2, effective_date=req_d,
+            direction=Direction.OUTFLOW, direction_original="outflow", amount_original=Decimal("300.00"),
+            currency_original="USD", amount_home=Decimal("300.00"), home_currency="USD",
+            exchange_rate_used=Decimal("1"), exchange_rate_date=req_d, status="settled",
+            is_cash_event=True, cash_impact_type=CashImpactType.SCHEDULED_OUTFLOW, event_type="expense",
+            category="rent", description="Rent", flexibility="fixed",
+            minimum_allowed_amount_original=None, minimum_allowed_amount_home=None, linked_event_id=None,
+            recurrence_type=RecurrenceClassification.UNKNOWN, is_unresolved=False, unresolved_reason=None,
+            evidence_chain=(), applied_actions=(),
+        )
+
+        base = simulate_user(uid, req_d, req_d + timedelta(days=90), canonical_events=[ob1, ob2], profile=prof)
+
+        # Compare safe-to-pay under different event IDs:
+        # 1. default candidate event ID
+        # 2. 000_lexically_first
+        # 3. zzz_lexically_last
+        # 4. arbitrary UUID
+        results = []
+        for eid in [None, "000_first_cand", "zzz_last_cand", "uuid_98374827_cand"]:
+            cand = make_candidate_purchase_event(req, Decimal("400.00"), req_d, "USD", event_id=eid)
+            sim = simulate_user(uid, req_d, req_d + timedelta(days=90), canonical_events=[ob1, ob2], profile=prof, additional_events=[cand])
+            trans = [t for t in sim.event_transitions if t.date == req_d]
+            # Scheduled obligations must always precede candidate purchase
+            self.assertEqual(trans[0].event_id, "bill_electricity")
+            self.assertEqual(trans[1].event_id, "rent_apartment")
+            self.assertEqual(trans[2].event_id, cand.event_id)
+            results.append((sim.minimum_projected_available_cash, sim.is_safety_floor_breached, sim.ending_state.available_cash))
+
+        # All runs produce 100% identical financial outcomes
+        self.assertEqual(len(set(results)), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

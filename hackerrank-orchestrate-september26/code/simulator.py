@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
-from enum import Enum
+from enum import Enum, IntEnum
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from code.canonical import CanonicalEvent, CashImpactType, Direction
@@ -22,12 +22,13 @@ from code.models import FinancialProfile
 from code.recurrence import FutureEvent
 
 
-class EventPriority(int, Enum):
-    """Deterministic priority for same-day event application."""
-    INFLOW = 0       # Settled/scheduled/forecast credits arrive first so funds are accessible
-    PENDING_HOLD = 1 # Pending debit authorizations reserve cash
-    OUTFLOW = 2      # Settled debits, scheduled debits, and forecast expenses execute
-    NON_CASH = 3     # Ignored, failed, cancelled, or unrealized records (0 cash impact)
+class EventPriority(IntEnum):
+    """Deterministic intra-day execution ordering."""
+    INFLOW = 0       # Priority 0: Inflows (settled and scheduled credits)
+    PENDING_HOLD = 1 # Priority 1: Pending debit reservations
+    OUTFLOW = 2      # Priority 2: Scheduled obligations / outflows (settled and scheduled debits)
+    CANDIDATE_ACTION = 3 # Priority 3: Proposed candidate purchases / actions
+    NON_CASH = 4     # Priority 4: Ignored, failed, cancelled, or unrealized records (0 cash impact)
 
 
 @dataclass(frozen=True)
@@ -309,6 +310,8 @@ def _get_event_priority(event: SimulatedEvent) -> EventPriority:
         return EventPriority.INFLOW
     if event.cash_impact_type == CashImpactType.PENDING_DEBIT_RESERVED:
         return EventPriority.PENDING_HOLD
+    if event.source_type == "action" and event.direction == Direction.OUTFLOW:
+        return EventPriority.CANDIDATE_ACTION
     if event.direction == Direction.OUTFLOW:
         return EventPriority.OUTFLOW
     return EventPriority.NON_CASH
