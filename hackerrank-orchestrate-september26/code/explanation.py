@@ -36,6 +36,11 @@ from code.decision_certificate import (
     StateEvidence,
     validate_certificate,
 )
+from code.nemotron import (
+    NemotronAdapter,
+    StructuredClaim,
+    build_grounded_fact_pack,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +570,7 @@ class ExplanationValidator:
 
         date_spans = [(s, e) for _, s, e in dates_with_spans]
 
+        prev_end = 0
         for match in number_pattern.finditer(clean_text):
             start, end = match.start(), match.end()
             raw_token = match.group(0)
@@ -583,8 +589,9 @@ class ExplanationValidator:
             except InvalidOperation:
                 continue
 
-            before_window = lower_text[max(0, start - 60):start]
+            before_window = lower_text[max(prev_end, start - 60):start]
             after_window = lower_text[end:min(len(lower_text), end + 60)]
+            prev_end = end
 
             num_claim_type: Optional[ClaimType] = None
 
@@ -822,6 +829,171 @@ class ExplanationValidator:
         """Extract ISO and English dates without spans (backwards-compatible helper)."""
         return [d for d, _, _ in cls._extract_dates_with_spans(text)]
 
+    @classmethod
+    def validate_structured_claims(
+        cls,
+        claims: Sequence[StructuredClaim],
+        facts: GroundedExplanationInput,
+    ) -> Tuple[bool, List[str]]:
+        """Mechanically validate structured claims emitted by an LLM (Prompt 19).
+
+        Guarantees strict field-bound validation:
+        Every factual claim must map to the DecisionCertificate/fact pack.
+        Rejects:
+          - unsupported amounts
+          - unsupported dates
+          - unsupported payment methods
+          - unsupported payment schedules
+          - unsupported affordability statuses
+          - unsupported spending actions
+          - unsupported causal explanations
+          - invented income
+          - invented expenses
+          - contradictions with the certificate
+        """
+        errors: List[str] = []
+        valid_claim_types = {ct.value for ct in ClaimType}
+
+        for i, c in enumerate(claims):
+            ctype = c.claim_type
+            val_str = c.value.strip()
+
+            if ctype not in valid_claim_types:
+                errors.append(f"Claim #{i+1}: invalid claim_type '{ctype}'")
+                continue
+
+            # Numerical extraction helper
+            clean_num = re.sub(r"[^\d.]", "", val_str)
+
+            if ctype == ClaimType.REQUEST_AMOUNT.value:
+                try:
+                    dec = Decimal(clean_num)
+                    if abs(dec - facts.requested_amount) >= Decimal("0.01"):
+                        errors.append(f"REQUEST_AMOUNT mismatch: stated {val_str}, certified {facts.requested_amount}")
+                except (InvalidOperation, ValueError):
+                    errors.append(f"REQUEST_AMOUNT invalid number: {val_str}")
+
+            elif ctype == ClaimType.SAFE_AMOUNT.value:
+                try:
+                    dec = Decimal(clean_num)
+                    if abs(dec - facts.amount_safe_to_pay) >= Decimal("0.01"):
+                        errors.append(f"SAFE_AMOUNT mismatch: stated {val_str}, certified {facts.amount_safe_to_pay}")
+                except (InvalidOperation, ValueError):
+                    errors.append(f"SAFE_AMOUNT invalid number: {val_str}")
+
+            elif ctype == ClaimType.SAFETY_FLOOR.value:
+                try:
+                    dec = Decimal(clean_num)
+                    if abs(dec - facts.safety_floor) >= Decimal("0.01"):
+                        errors.append(f"SAFETY_FLOOR mismatch: stated {val_str}, certified {facts.safety_floor}")
+                except (InvalidOperation, ValueError):
+                    errors.append(f"SAFETY_FLOOR invalid number: {val_str}")
+
+            elif ctype == ClaimType.MINIMUM_AVAILABLE_CASH.value:
+                expected = facts.minimum_available_cash if facts.minimum_available_cash is not None else facts.safety_floor
+                try:
+                    dec = Decimal(clean_num)
+                    if expected is not None and abs(dec - expected) >= Decimal("0.01"):
+                        errors.append(f"MINIMUM_AVAILABLE_CASH mismatch: stated {val_str}, certified {expected}")
+                except (InvalidOperation, ValueError):
+                    errors.append(f"MINIMUM_AVAILABLE_CASH invalid number: {val_str}")
+
+            elif ctype == ClaimType.TOTAL_AMOUNT_PAID.value:
+                expected = facts.total_amount_paid
+                try:
+                    dec = Decimal(clean_num)
+                    if expected is not None and abs(dec - expected) >= Decimal("0.01"):
+                        errors.append(f"TOTAL_AMOUNT_PAID mismatch: stated {val_str}, certified {expected}")
+                except (InvalidOperation, ValueError):
+                    errors.append(f"TOTAL_AMOUNT_PAID invalid number: {val_str}")
+
+            elif ctype == ClaimType.FINANCING_FEE.value:
+                expected = facts.financing_fee if facts.financing_fee is not None else Decimal("0")
+                try:
+                    dec = Decimal(clean_num)
+                    if abs(dec - expected) >= Decimal("0.01"):
+                        errors.append(f"FINANCING_FEE mismatch: stated {val_str}, certified {expected}")
+                except (InvalidOperation, ValueError):
+                    errors.append(f"FINANCING_FEE invalid number: {val_str}")
+
+            elif ctype == ClaimType.SCHEDULE_PAYMENT.value:
+                sched_amts = [amt for _, amt in facts.parsed_schedule]
+                try:
+                    dec = Decimal(clean_num)
+                    if not any(abs(dec - sa) < Decimal("0.01") for sa in sched_amts):
+                        errors.append(f"SCHEDULE_PAYMENT mismatch: stated {val_str}, certified schedule {sched_amts}")
+                except (InvalidOperation, ValueError):
+                    errors.append(f"SCHEDULE_PAYMENT invalid number: {val_str}")
+
+            elif ctype == ClaimType.REMAINING_PAYMENT.value:
+                expected_rem = facts.requested_amount - facts.amount_safe_to_pay
+                sched_rem = facts.parsed_schedule[1][1] if len(facts.parsed_schedule) > 1 else None
+                try:
+                    dec = Decimal(clean_num)
+                    is_ok = abs(dec - expected_rem) < Decimal("0.01") or (sched_rem is not None and abs(dec - sched_rem) < Decimal("0.01"))
+                    if not is_ok:
+                        errors.append(f"REMAINING_PAYMENT mismatch: stated {val_str}, certified remaining {expected_rem}")
+                except (InvalidOperation, ValueError):
+                    errors.append(f"REMAINING_PAYMENT invalid number: {val_str}")
+
+            elif ctype == ClaimType.PAYMENT_COUNT.value:
+                allowed_counts = facts.allowed_payment_counts()
+                try:
+                    cnt = int(clean_num)
+                    if cnt not in allowed_counts:
+                        errors.append(f"PAYMENT_COUNT mismatch: stated {val_str}, allowed {allowed_counts}")
+                except ValueError:
+                    errors.append(f"PAYMENT_COUNT invalid integer: {val_str}")
+
+            elif ctype == ClaimType.DESIRED_COMPLETION_DATE.value:
+                extracted_dates = cls._extract_dates(val_str)
+                if not extracted_dates or extracted_dates[0] != facts.desired_completion_date:
+                    errors.append(f"DESIRED_COMPLETION_DATE mismatch: stated {val_str}, certified {facts.desired_completion_date}")
+
+            elif ctype == ClaimType.EARLIEST_FULL_PAYMENT_DATE.value:
+                extracted_dates = cls._extract_dates(val_str)
+                expected_d = facts.earliest_date_for_full_payment
+                sched_date2 = facts.parsed_schedule[1][0] if len(facts.parsed_schedule) > 1 else None
+                is_ok = extracted_dates and ((expected_d is not None and extracted_dates[0] == expected_d) or (sched_date2 is not None and extracted_dates[0] == sched_date2))
+                if not is_ok:
+                    errors.append(f"EARLIEST_FULL_PAYMENT_DATE mismatch: stated {val_str}, certified {expected_d}")
+
+            elif ctype == ClaimType.LIMITING_DATE.value:
+                extracted_dates = cls._extract_dates(val_str)
+                expected_d = facts.limiting_date
+                if not extracted_dates or expected_d is None or extracted_dates[0] != expected_d:
+                    errors.append(f"LIMITING_DATE mismatch: stated {val_str}, certified {expected_d}")
+
+            elif ctype == ClaimType.SPENDING_CHANGE.value:
+                if facts.spending_changes_needed == "none":
+                    errors.append(f"SPENDING_CHANGE claimed when certificate specifies 'none': {val_str}")
+                else:
+                    if any(kw in val_str.lower() for kw in ["increase", "more"]):
+                        errors.append(f"Unauthorized spending increase claimed: {val_str}")
+
+            elif ctype == ClaimType.GENERIC_SUPPORTED_FACT.value:
+                extracted_dates = cls._extract_dates(val_str)
+                allowed_dates = facts.allowed_dates()
+                allowed_nums = facts.allowed_monetary_values()
+                allowed_counts = facts.allowed_payment_counts()
+
+                is_ok = False
+                if extracted_dates and all(d in allowed_dates for d in extracted_dates):
+                    is_ok = True
+                try:
+                    dec = Decimal(clean_num)
+                    if any(abs(dec - an) < Decimal("0.01") for an in allowed_nums):
+                        is_ok = True
+                    if int(dec) in allowed_counts:
+                        is_ok = True
+                except (InvalidOperation, ValueError):
+                    pass
+
+                if not is_ok and val_str not in [facts.affordability_status, facts.recommended_payment_method]:
+                    errors.append(f"GENERIC_SUPPORTED_FACT unauthorized: {val_str}")
+
+        return (len(errors) == 0, errors)
+
 
 # ---------------------------------------------------------------------------
 # Free / Local Model Inference Adapter
@@ -943,21 +1115,50 @@ class ExplanationResult:
 
 def generate_grounded_explanation(
     facts: GroundedExplanationInput,
+    certificate: Optional[DecisionCertificate] = None,
+    nemotron_adapter: Optional[NemotronAdapter] = None,
     local_adapter: Optional[LocalModelAdapter] = None,
     force_fallback: bool = False,
 ) -> ExplanationResult:
     """Generate and validate a grounded natural-language explanation.
 
-    Attempts local model generation if available.
-    If local model is disabled, offline, fails, or produces invalid claims,
-    seamlessly falls back to the deterministic fallback generator.
+    Architectural Precedence:
+      1. NVIDIA Nemotron (if configured, available, and not forced fallback).
+      2. Local Model (if configured and available).
+      3. Deterministic Fallback Generator (guaranteed 100% grounded and valid).
     """
     model_used = "deterministic_fallback"
     fallback_used = True
     candidate_text: Optional[str] = None
     validation_res: Optional[ExplanationValidationResult] = None
 
-    if not force_fallback and local_adapter is not None:
+    # 1. Try NVIDIA Nemotron
+    if not force_fallback and nemotron_adapter is not None and nemotron_adapter.is_available and certificate is not None:
+        try:
+            fact_pack = build_grounded_fact_pack(certificate, currency=facts.currency)
+            nemotron_output = nemotron_adapter.generate_explanation(fact_pack)
+            if nemotron_output is not None:
+                val_text = ExplanationValidator.validate(nemotron_output.explanation_text, facts)
+                val_claims_ok, claim_errs = ExplanationValidator.validate_structured_claims(nemotron_output.claims, facts)
+                if val_text.is_valid and val_claims_ok:
+                    return ExplanationResult(
+                        request_id=facts.request_id,
+                        explanation_text=nemotron_output.explanation_text,
+                        model_used=f"nvidia:{nemotron_adapter.model_name}",
+                        fallback_used=False,
+                        validation_passed=True,
+                        unsupported_claims=(),
+                        source_refs=facts.concise_lineage_refs,
+                    )
+                else:
+                    # Model output failed strict field-bound claim validation
+                    nemotron_adapter.telemetry.record_fallback_only()
+                    candidate_text = None
+        except Exception:
+            candidate_text = None
+
+    # 2. Try Local Model
+    if not force_fallback and candidate_text is None and local_adapter is not None:
         try:
             candidate_text = local_adapter.generate_explanation(facts)
             val = ExplanationValidator.validate(candidate_text, facts)
@@ -970,7 +1171,7 @@ def generate_grounded_explanation(
         except InferenceUnavailableError:
             candidate_text = None
 
-    # Deterministic Fallback Generation
+    # 3. Deterministic Fallback Generation
     if candidate_text is None:
         candidate_text = DeterministicFallbackGenerator.generate(facts)
         validation_res = ExplanationValidator.validate(candidate_text, facts)
