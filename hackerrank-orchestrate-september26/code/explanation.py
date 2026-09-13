@@ -26,6 +26,7 @@ import urllib.error
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from code.decision_certificate import (
@@ -355,8 +356,31 @@ class DeterministicFallbackGenerator:
 
 
 # ---------------------------------------------------------------------------
-# Strict Explanation Validator
+# Semantic Claim Types & Explanation Validation (Prompt 14C)
 # ---------------------------------------------------------------------------
+
+class ClaimType(str, Enum):
+    """Authoritative semantic claim types for grounded explanation validation.
+
+    Ensures every number, date, action, and count binds to a specific financial claim slot
+    rather than relying on global set membership.
+    """
+    PAYMENT_AMOUNT = "PAYMENT_AMOUNT"
+    REQUEST_AMOUNT = "REQUEST_AMOUNT"
+    SAFE_AMOUNT = "SAFE_AMOUNT"
+    SAFETY_FLOOR = "SAFETY_FLOOR"
+    MINIMUM_AVAILABLE_CASH = "MINIMUM_AVAILABLE_CASH"
+    TOTAL_AMOUNT_PAID = "TOTAL_AMOUNT_PAID"
+    FINANCING_FEE = "FINANCING_FEE"
+    SCHEDULE_PAYMENT = "SCHEDULE_PAYMENT"
+    REMAINING_PAYMENT = "REMAINING_PAYMENT"
+    PAYMENT_COUNT = "PAYMENT_COUNT"
+    EARLIEST_FULL_PAYMENT_DATE = "EARLIEST_FULL_PAYMENT_DATE"
+    DESIRED_COMPLETION_DATE = "DESIRED_COMPLETION_DATE"
+    LIMITING_DATE = "LIMITING_DATE"
+    SPENDING_CHANGE = "SPENDING_CHANGE"
+    GENERIC_SUPPORTED_FACT = "GENERIC_SUPPORTED_FACT"
+
 
 @dataclass(frozen=True)
 class ExplanationValidationResult:
@@ -364,6 +388,7 @@ class ExplanationValidationResult:
     is_valid: bool
     errors: Tuple[str, ...]
     unsupported_claims: Tuple[str, ...]
+    bound_claims: Tuple[Tuple[str, str, str], ...] = ()
 
     def raise_if_invalid(self) -> None:
         if not self.is_valid:
@@ -373,12 +398,15 @@ class ExplanationValidationResult:
 class ExplanationValidator:
     """Mechanically checks an explanation against GroundedExplanationInput facts.
 
+    Replaces global set membership with strict semantic fact-binding (Prompt 14C).
     Rejects:
-    1. Hallucinated numbers/amounts not found in authorized facts.
-    2. Hallucinated dates not found in authorized facts.
-    3. Contradictory payment methods (e.g. recommending installments when full_payment).
-    4. Contradictory affordability status (e.g. claiming affordable when not_affordable).
-    5. Discrepancies in installment counts.
+    1. Semantic field-swapping (e.g. claiming requested amount as safety floor, or safety floor as available cash).
+    2. Hallucinated numbers/amounts not authorized in specific claim slots.
+    3. Hallucinated dates and date field-swapping (e.g. earliest payment date vs desired completion date).
+    4. Unauthorized spending actions (e.g. increasing spending, or reducing spending when none needed).
+    5. Contradictory payment methods (e.g. advising payment on not_recommended, installments on full_payment).
+    6. Contradictory affordability status (e.g. claiming affordable when not_affordable).
+    7. Discrepancies in installment counts.
     """
 
     MONTH_NAMES = {
@@ -395,32 +423,43 @@ class ExplanationValidator:
     ) -> ExplanationValidationResult:
         errors: List[str] = []
         unsupported_claims: List[str] = []
+        bound_claims: List[Tuple[str, str, str]] = []
 
         if not explanation or not explanation.strip():
             return ExplanationValidationResult(
                 is_valid=False,
                 errors=("Explanation is empty",),
                 unsupported_claims=("empty_explanation",),
+                bound_claims=(),
             )
 
-        text = explanation.strip()
+        clean_text = explanation.strip()
+        lower_text = clean_text.lower()
 
         # 1. Contradictory Payment Method Checks
         method = facts.recommended_payment_method
-        lower_text = text.lower()
-
         if method == "not_recommended":
-            if any(term in lower_text for term in ["pay today", "use installments", "pay in full today"]):
+            if any(term in lower_text for term in [
+                "pay today", "use installments", "pay in full today", "pay the full amount today",
+                "proceed with payment", "proceed with the payment"
+            ]):
                 errors.append("Contradictory payment method: advised payment on not_recommended decision")
                 unsupported_claims.append("contradictory_payment_advice")
         elif method == "full_payment":
-            if "installments" in lower_text:
+            if "installments" in lower_text or "use 3 installments" in lower_text:
                 errors.append("Contradictory payment method: mentioned installments on full_payment decision")
                 unsupported_claims.append("contradictory_installment_mention")
+            if "wait until" in lower_text or "wait for" in lower_text or "wait to pay" in lower_text:
+                errors.append("Contradictory payment method: advised waiting on full_payment decision")
+                unsupported_claims.append("contradictory_wait_advice")
         elif method == "wait":
-            if "pay today" in lower_text or "installments" in lower_text:
+            if "pay today" in lower_text or "pay now" in lower_text or "pay in full today" in lower_text or "installments" in lower_text:
                 errors.append("Contradictory payment method: advised pay today/installments on wait decision")
                 unsupported_claims.append("contradictory_wait_advice")
+        elif method == "installments":
+            if "pay in full today" in lower_text or "wait until" in lower_text:
+                errors.append("Contradictory payment method: advised full payment/wait on installments decision")
+                unsupported_claims.append("contradictory_installments_advice")
 
         # 2. Contradictory Status Checks
         if facts.affordability_status == "not_affordable":
@@ -429,26 +468,96 @@ class ExplanationValidator:
                     errors.append("Contradictory status: claimed request is affordable")
                     unsupported_claims.append("contradictory_status_claim")
 
-        # 3. Numeric Amount Extraction and Validation
+        # 3. Spending-Change Action Semantics
+        if re.search(r"\bincrease\s+(?:spending|[a-zA-Z0-9_\s-]+\s+by)\b", lower_text):
+            errors.append("Unauthorized action: 'increase spending' is not supported")
+            unsupported_claims.append("unauthorized_action:increase_spending")
+            bound_claims.append((ClaimType.SPENDING_CHANGE.value, "increase_spending", "FAIL"))
+
+        if facts.spending_changes_needed == "none":
+            if re.search(r"\b(?:reduce\s+spending|cut\s+spending|stop\s+spending|reduce\s+the\s+expense|stop\s+the\s+expense)\b", lower_text):
+                errors.append("Unauthorized spending action: asserted spending changes when certificate requires none")
+                unsupported_claims.append("unauthorized_spending_action")
+                bound_claims.append((ClaimType.SPENDING_CHANGE.value, "unauthorized_reduction", "FAIL"))
+
+        # 4. Date Extraction and Semantic Binding
+        dates_with_spans = cls._extract_dates_with_spans(clean_text)
+        allowed_dates = facts.allowed_dates()
+
+        for d, start, end in dates_with_spans:
+            before_window = lower_text[max(0, start - 60):start]
+            after_window = lower_text[end:min(len(lower_text), end + 60)]
+
+            date_claim_type: Optional[ClaimType] = None
+
+            if any(cue in before_window for cue in ["completed by", "by ", "desired completion date", "deadline"]):
+                date_claim_type = ClaimType.DESIRED_COMPLETION_DATE
+                expected_date = facts.desired_completion_date
+                if expected_date is None or d != expected_date:
+                    errors.append(f"Semantic mismatch for DESIRED_COMPLETION_DATE: stated {d.isoformat()}, authorized {expected_date.isoformat() if expected_date else None}")
+                    unsupported_claims.append(f"invalid_date_claim:{date_claim_type.value}:{d.isoformat()}")
+                    bound_claims.append((date_claim_type.value, d.isoformat(), "FAIL"))
+                else:
+                    bound_claims.append((date_claim_type.value, d.isoformat(), "PASS"))
+
+            elif any(cue in before_window for cue in ["earliest safe payment date", "earliest full payment date", "earliest date", "safe date", "in full on", "remaining"]):
+                date_claim_type = ClaimType.EARLIEST_FULL_PAYMENT_DATE
+                expected_date = facts.earliest_date_for_full_payment
+                sched_date2 = facts.parsed_schedule[1][0] if len(facts.parsed_schedule) > 1 else None
+                is_ok_date = (expected_date is not None and d == expected_date) or (sched_date2 is not None and d == sched_date2)
+                if not is_ok_date:
+                    errors.append(f"Semantic mismatch for EARLIEST_FULL_PAYMENT_DATE: stated {d.isoformat()}, authorized {expected_date.isoformat() if expected_date else None}")
+                    unsupported_claims.append(f"invalid_date_claim:{date_claim_type.value}:{d.isoformat()}")
+                    bound_claims.append((date_claim_type.value, d.isoformat(), "FAIL"))
+                else:
+                    bound_claims.append((date_claim_type.value, d.isoformat(), "PASS"))
+
+            elif any(cue in before_window for cue in ["limiting date"]):
+                date_claim_type = ClaimType.LIMITING_DATE
+                expected_date = facts.limiting_date
+                if expected_date is None or d != expected_date:
+                    errors.append(f"Semantic mismatch for LIMITING_DATE: stated {d.isoformat()}, authorized {expected_date.isoformat() if expected_date else None}")
+                    unsupported_claims.append(f"invalid_date_claim:{date_claim_type.value}:{d.isoformat()}")
+                    bound_claims.append((date_claim_type.value, d.isoformat(), "FAIL"))
+                else:
+                    bound_claims.append((date_claim_type.value, d.isoformat(), "PASS"))
+
+            elif "starting" in before_window:
+                date_claim_type = ClaimType.SCHEDULE_PAYMENT
+                expected_date = facts.parsed_schedule[0][0] if facts.parsed_schedule else None
+                if expected_date is None or d != expected_date:
+                    errors.append(f"Semantic mismatch for schedule start date: stated {d.isoformat()}, authorized {expected_date.isoformat() if expected_date else None}")
+                    unsupported_claims.append(f"invalid_date_claim:{date_claim_type.value}:{d.isoformat()}")
+                    bound_claims.append((date_claim_type.value, d.isoformat(), "FAIL"))
+                else:
+                    bound_claims.append((date_claim_type.value, d.isoformat(), "PASS"))
+
+            if date_claim_type is None:
+                if d not in allowed_dates:
+                    errors.append(f"Hallucinated or unauthorized date: {d.isoformat()}")
+                    unsupported_claims.append(f"unauthorized_date:{d.isoformat()}")
+                    bound_claims.append((ClaimType.GENERIC_SUPPORTED_FACT.value, d.isoformat(), "FAIL"))
+                else:
+                    bound_claims.append((ClaimType.GENERIC_SUPPORTED_FACT.value, d.isoformat(), "PASS"))
+
+        # 5. Number Extraction and Semantic Binding
+        number_pattern = re.compile(r"(?<![a-zA-Z0-9_-])(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)(?![a-zA-Z0-9_-])")
         allowed_nums = facts.allowed_monetary_values()
         allowed_counts = facts.allowed_payment_counts()
 
-        number_pattern = re.compile(r"(?<![a-zA-Z0-9_-])(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)(?![a-zA-Z0-9_-])")
+        date_spans = [(s, e) for _, s, e in dates_with_spans]
 
-        dates_in_text = cls._extract_dates(text)
-        date_number_tokens: Set[str] = set()
-        for d in dates_in_text:
-            date_number_tokens.add(str(d.day))
-            date_number_tokens.add(str(d.year))
-
-        for match in number_pattern.finditer(text):
+        for match in number_pattern.finditer(clean_text):
+            start, end = match.start(), match.end()
             raw_token = match.group(0)
             cleaned = raw_token.replace(",", "")
 
-            if raw_token in date_number_tokens or cleaned in date_number_tokens:
+            # Skip digits inside dates (e.g. day or year)
+            if any(ds <= start and end <= de for ds, de in date_spans):
                 continue
 
-            if cleaned == "90":  # 90-day forecast horizon standard
+            # Skip forecast horizon 90 days
+            if cleaned == "90":
                 continue
 
             try:
@@ -456,63 +565,244 @@ class ExplanationValidator:
             except InvalidOperation:
                 continue
 
-            is_allowed_money = any(
-                abs(dec_val - allowed) < Decimal("0.01")
-                for allowed in allowed_nums
-            )
-            is_allowed_count = (int(dec_val) in allowed_counts if dec_val == int(dec_val) else False)
+            before_window = lower_text[max(0, start - 60):start]
+            after_window = lower_text[end:min(len(lower_text), end + 60)]
 
-            if not is_allowed_money and not is_allowed_count:
-                errors.append(f"Hallucinated or unauthorized number: {raw_token}")
-                unsupported_claims.append(f"unauthorized_number:{raw_token}")
+            num_claim_type: Optional[ClaimType] = None
 
-        # 4. Date Validation
-        allowed_dates = facts.allowed_dates()
-        for dt in dates_in_text:
-            if dt not in allowed_dates:
-                if not any(abs((dt - ad).days) == 0 for ad in allowed_dates):
-                    errors.append(f"Hallucinated or unauthorized date: {dt.isoformat()}")
-                    unsupported_claims.append(f"unauthorized_date:{dt.isoformat()}")
+            # A. Safety Floor
+            if any(cue in before_window for cue in ["safety floor", "minimum balance", "protected minimum"]) or \
+               any(cue in after_window for cue in ["minimum protected", "minimum balance", "minimum requirement"]) or \
+               ("minimum" in after_window and any(cue in before_window for cue in ["keeps the", "below the", "the "])):
+                num_claim_type = ClaimType.SAFETY_FLOOR
+                expected = facts.safety_floor
+                if expected is None or abs(dec_val - expected) >= Decimal("0.01"):
+                    errors.append(f"Semantic mismatch for SAFETY_FLOOR: stated {raw_token}, authorized {expected}")
+                    unsupported_claims.append(f"invalid_slot_claim:{num_claim_type.value}:{raw_token}")
+                    bound_claims.append((num_claim_type.value, raw_token, "FAIL"))
+                else:
+                    bound_claims.append((num_claim_type.value, raw_token, "PASS"))
 
-        # 5. Installment Count Consistency
-        if "installment" in lower_text:
-            for count in [2, 3, 4, 5, 6, 8, 10, 12]:
-                if f"{count} installment" in lower_text or f"{count} payment" in lower_text:
-                    if count not in allowed_counts:
-                        errors.append(f"Discrepant installment count: stated {count}, allowed {allowed_counts}")
-                        unsupported_claims.append(f"invalid_count:{count}")
+            # B. Minimum Available Cash
+            elif any(cue in before_window for cue in ["leaves at least", "minimum available cash", "available cash", "at least"]) and \
+                 ("available" in after_window or "available" in before_window):
+                num_claim_type = ClaimType.MINIMUM_AVAILABLE_CASH
+                expected = facts.minimum_available_cash if facts.minimum_available_cash is not None else facts.safety_floor
+                if expected is None or abs(dec_val - expected) >= Decimal("0.01"):
+                    errors.append(f"Semantic mismatch for MINIMUM_AVAILABLE_CASH: stated {raw_token}, authorized {expected}")
+                    unsupported_claims.append(f"invalid_slot_claim:{num_claim_type.value}:{raw_token}")
+                    bound_claims.append((num_claim_type.value, raw_token, "FAIL"))
+                else:
+                    bound_claims.append((num_claim_type.value, raw_token, "PASS"))
+
+            elif any(cue in before_window for cue in ["minimum available cash", "available cash"]):
+                num_claim_type = ClaimType.MINIMUM_AVAILABLE_CASH
+                expected = facts.minimum_available_cash if facts.minimum_available_cash is not None else facts.safety_floor
+                if expected is None or abs(dec_val - expected) >= Decimal("0.01"):
+                    errors.append(f"Semantic mismatch for MINIMUM_AVAILABLE_CASH: stated {raw_token}, authorized {expected}")
+                    unsupported_claims.append(f"invalid_slot_claim:{num_claim_type.value}:{raw_token}")
+                    bound_claims.append((num_claim_type.value, raw_token, "FAIL"))
+                else:
+                    bound_claims.append((num_claim_type.value, raw_token, "PASS"))
+
+            # C. Financing Fee
+            elif any(cue in before_window for cue in ["financing fee", "fee of", "fee is"]) or \
+                 any(cue in after_window for cue in ["financing fee", "fee"]):
+                num_claim_type = ClaimType.FINANCING_FEE
+                expected = facts.financing_fee if facts.financing_fee is not None else Decimal("0")
+                if abs(dec_val - expected) >= Decimal("0.01"):
+                    errors.append(f"Semantic mismatch for FINANCING_FEE: stated {raw_token}, authorized {expected}")
+                    unsupported_claims.append(f"invalid_slot_claim:{num_claim_type.value}:{raw_token}")
+                    bound_claims.append((num_claim_type.value, raw_token, "FAIL"))
+                else:
+                    bound_claims.append((num_claim_type.value, raw_token, "PASS"))
+
+            # D. Total Amount Paid
+            elif any(cue in before_window for cue in ["total amount paid", "total amount of", "total cost", "total paid", "total of"]):
+                num_claim_type = ClaimType.TOTAL_AMOUNT_PAID
+                expected = facts.total_amount_paid
+                if expected is None or abs(dec_val - expected) >= Decimal("0.01"):
+                    errors.append(f"Semantic mismatch for TOTAL_AMOUNT_PAID: stated {raw_token}, authorized {expected}")
+                    unsupported_claims.append(f"invalid_slot_claim:{num_claim_type.value}:{raw_token}")
+                    bound_claims.append((num_claim_type.value, raw_token, "FAIL"))
+                else:
+                    bound_claims.append((num_claim_type.value, raw_token, "PASS"))
+
+            # E. Safe Amount Today
+            elif any(cue in before_window for cue in ["amount safe to pay", "safe to pay", "safe amount"]) or \
+                 ("although" in before_window and "available today" in after_window):
+                num_claim_type = ClaimType.SAFE_AMOUNT
+                expected = facts.amount_safe_to_pay
+                if expected is None or abs(dec_val - expected) >= Decimal("0.01"):
+                    errors.append(f"Semantic mismatch for SAFE_AMOUNT: stated {raw_token}, authorized {expected}")
+                    unsupported_claims.append(f"invalid_slot_claim:{num_claim_type.value}:{raw_token}")
+                    bound_claims.append((num_claim_type.value, raw_token, "FAIL"))
+                else:
+                    bound_claims.append((num_claim_type.value, raw_token, "PASS"))
+
+            # F. Remaining Payment
+            elif "remaining" in before_window:
+                num_claim_type = ClaimType.REMAINING_PAYMENT
+                expected_rem = (
+                    facts.requested_amount - facts.amount_safe_to_pay
+                    if (facts.requested_amount is not None and facts.amount_safe_to_pay is not None)
+                    else None
+                )
+                sched_rem = facts.parsed_schedule[1][1] if len(facts.parsed_schedule) > 1 else None
+                is_valid_rem = (
+                    (expected_rem is not None and abs(dec_val - expected_rem) < Decimal("0.01")) or
+                    (sched_rem is not None and abs(dec_val - sched_rem) < Decimal("0.01"))
+                )
+                if not is_valid_rem:
+                    errors.append(f"Semantic mismatch for REMAINING_PAYMENT: stated {raw_token}, authorized {expected_rem}")
+                    unsupported_claims.append(f"invalid_slot_claim:{num_claim_type.value}:{raw_token}")
+                    bound_claims.append((num_claim_type.value, raw_token, "FAIL"))
+                else:
+                    bound_claims.append((num_claim_type.value, raw_token, "PASS"))
+
+            # G. Schedule Installment Payment
+            elif "installments of" in before_window or "installment of" in before_window:
+                num_claim_type = ClaimType.SCHEDULE_PAYMENT
+                sched_amts = [amt for _, amt in facts.parsed_schedule]
+                if not any(abs(dec_val - sa) < Decimal("0.01") for sa in sched_amts):
+                    errors.append(f"Semantic mismatch for SCHEDULE_PAYMENT: stated {raw_token}, authorized {sched_amts}")
+                    unsupported_claims.append(f"invalid_slot_claim:{num_claim_type.value}:{raw_token}")
+                    bound_claims.append((num_claim_type.value, raw_token, "FAIL"))
+                else:
+                    bound_claims.append((num_claim_type.value, raw_token, "PASS"))
+
+            # H. Payment Count
+            elif re.search(r"^\s*(?:installments?|payments?)\b", after_window):
+                num_claim_type = ClaimType.PAYMENT_COUNT
+                if dec_val != int(dec_val) or int(dec_val) not in allowed_counts:
+                    errors.append(f"Discrepant installment count: stated {raw_token}, allowed {allowed_counts}")
+                    unsupported_claims.append(f"invalid_count:{raw_token}")
+                    bound_claims.append((num_claim_type.value, raw_token, "FAIL"))
+                else:
+                    bound_claims.append((num_claim_type.value, raw_token, "PASS"))
+
+            # I. Request Amount
+            elif any(cue in before_window for cue in ["the request is", "requested amount", "request of", "proceed with the", "make this payment of"]) or \
+                 "request" in after_window:
+                num_claim_type = ClaimType.REQUEST_AMOUNT
+                expected = facts.requested_amount
+                if expected is None or abs(dec_val - expected) >= Decimal("0.01"):
+                    errors.append(f"Semantic mismatch for REQUEST_AMOUNT: stated {raw_token}, authorized {expected}")
+                    unsupported_claims.append(f"invalid_slot_claim:{num_claim_type.value}:{raw_token}")
+                    bound_claims.append((num_claim_type.value, raw_token, "FAIL"))
+                else:
+                    bound_claims.append((num_claim_type.value, raw_token, "PASS"))
+
+            # J. Direct Payment ("Pay <amt> today" / "Pay <amt> in full")
+            elif "pay " in before_window or "pay" in before_window:
+                if "today" in after_window:
+                    num_claim_type = ClaimType.PAYMENT_AMOUNT
+                    if method == "full_payment":
+                        expected = facts.requested_amount
+                        if expected is None or abs(dec_val - expected) >= Decimal("0.01"):
+                            errors.append(f"Semantic mismatch for PAYMENT_AMOUNT (full_payment today): stated {raw_token}, authorized {expected}")
+                            unsupported_claims.append(f"invalid_slot_claim:{num_claim_type.value}:{raw_token}")
+                            bound_claims.append((num_claim_type.value, raw_token, "FAIL"))
+                        else:
+                            bound_claims.append((num_claim_type.value, raw_token, "PASS"))
+                    elif method == "partial_payment":
+                        expected = facts.amount_safe_to_pay
+                        sched_first = facts.parsed_schedule[0][1] if facts.parsed_schedule else None
+                        is_ok = (
+                            (expected is not None and abs(dec_val - expected) < Decimal("0.01")) or
+                            (sched_first is not None and abs(dec_val - sched_first) < Decimal("0.01"))
+                        )
+                        if not is_ok:
+                            errors.append(f"Semantic mismatch for PAYMENT_AMOUNT (partial_payment today): stated {raw_token}, authorized {expected}")
+                            unsupported_claims.append(f"invalid_slot_claim:{num_claim_type.value}:{raw_token}")
+                            bound_claims.append((num_claim_type.value, raw_token, "FAIL"))
+                        else:
+                            bound_claims.append((num_claim_type.value, raw_token, "PASS"))
+                    else:
+                        errors.append(f"Payment today not authorized for method {method}")
+                        unsupported_claims.append(f"invalid_slot_claim:{num_claim_type.value}:{raw_token}")
+                        bound_claims.append((num_claim_type.value, raw_token, "FAIL"))
+
+                elif "in full on" in after_window or "in full" in after_window:
+                    num_claim_type = ClaimType.REQUEST_AMOUNT
+                    expected = facts.requested_amount
+                    if expected is None or abs(dec_val - expected) >= Decimal("0.01"):
+                        errors.append(f"Semantic mismatch for REQUEST_AMOUNT (in full): stated {raw_token}, authorized {expected}")
+                        unsupported_claims.append(f"invalid_slot_claim:{num_claim_type.value}:{raw_token}")
+                        bound_claims.append((num_claim_type.value, raw_token, "FAIL"))
+                    else:
+                        bound_claims.append((num_claim_type.value, raw_token, "PASS"))
+
+            # K. Spending Change reduce_to
+            elif any(cue in before_window for cue in ["reduce to", "reduce spending to", "reduce the"]):
+                num_claim_type = ClaimType.SPENDING_CHANGE
+                if facts.spending_changes_needed == "none":
+                    errors.append("Unauthorized spending reduction: spending_changes_needed is 'none'")
+                    unsupported_claims.append(f"invalid_slot_claim:{num_claim_type.value}:{raw_token}")
+                    bound_claims.append((num_claim_type.value, raw_token, "FAIL"))
+                else:
+                    authorized_reduces: List[Decimal] = []
+                    for part in facts.spending_changes_needed.split("|"):
+                        t = part.strip().split(":")
+                        if len(t) == 3 and t[0] == "reduce_to":
+                            try:
+                                authorized_reduces.append(Decimal(t[2]))
+                            except InvalidOperation:
+                                pass
+                    if not any(abs(dec_val - ar) < Decimal("0.01") for ar in authorized_reduces):
+                        errors.append(f"Unauthorized spending reduction amount {raw_token}, authorized {authorized_reduces}")
+                        unsupported_claims.append(f"invalid_slot_claim:{num_claim_type.value}:{raw_token}")
+                        bound_claims.append((num_claim_type.value, raw_token, "FAIL"))
+                    else:
+                        bound_claims.append((num_claim_type.value, raw_token, "PASS"))
+
+            # L. Fallback: Generic Supported Fact
+            if num_claim_type is None:
+                num_claim_type = ClaimType.GENERIC_SUPPORTED_FACT
+                is_allowed_money = any(abs(dec_val - allowed) < Decimal("0.01") for allowed in allowed_nums)
+                is_allowed_count = (int(dec_val) in allowed_counts if dec_val == int(dec_val) else False)
+                if not is_allowed_money and not is_allowed_count:
+                    errors.append(f"Hallucinated or unauthorized number: {raw_token}")
+                    unsupported_claims.append(f"unauthorized_number:{raw_token}")
+                    bound_claims.append((num_claim_type.value, raw_token, "FAIL"))
+                else:
+                    bound_claims.append((num_claim_type.value, raw_token, "PASS"))
 
         return ExplanationValidationResult(
             is_valid=(len(errors) == 0),
             errors=tuple(errors),
             unsupported_claims=tuple(unsupported_claims),
+            bound_claims=tuple(bound_claims),
         )
 
     @classmethod
-    def _extract_dates(cls, text: str) -> List[date]:
-        """Extract ISO (YYYY-MM-DD) and English (e.g. '8 August 2025') dates from text."""
-        extracted: List[date] = []
+    def _extract_dates_with_spans(cls, text: str) -> List[Tuple[date, int, int]]:
+        """Extract ISO (YYYY-MM-DD) and English (e.g. '8 August 2025') dates from text with character spans."""
+        extracted: List[Tuple[date, int, int]] = []
 
         iso_pattern = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
         for m in iso_pattern.finditer(text):
             try:
-                extracted.append(date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+                extracted.append((date(int(m.group(1)), int(m.group(2)), int(m.group(3))), m.start(), m.end()))
             except ValueError:
                 pass
 
-        eng_pattern = re.compile(
-            r"\b(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})\b"
-        )
+        eng_pattern = re.compile(r"\b(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})\b")
         for m in eng_pattern.finditer(text):
             day_str, month_str, year_str = m.group(1), m.group(2).lower(), m.group(3)
             if month_str in cls.MONTH_NAMES:
                 month_num = cls.MONTH_NAMES[month_str]
                 try:
-                    extracted.append(date(int(year_str), month_num, int(day_str)))
+                    extracted.append((date(int(year_str), month_num, int(day_str)), m.start(), m.end()))
                 except ValueError:
                     pass
 
         return extracted
+
+    @classmethod
+    def _extract_dates(cls, text: str) -> List[date]:
+        """Extract ISO and English dates without spans (backwards-compatible helper)."""
+        return [d for d, _, _ in cls._extract_dates_with_spans(text)]
 
 
 # ---------------------------------------------------------------------------

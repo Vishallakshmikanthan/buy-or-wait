@@ -25,6 +25,7 @@ from code.decision_certificate import (
     StateEvidence,
 )
 from code.explanation import (
+    ClaimType,
     DeterministicFallbackGenerator,
     ExplanationResult,
     ExplanationValidationResult,
@@ -404,6 +405,232 @@ class TestGroundedExplanation(unittest.TestCase):
         self.assertFalse(val.is_valid)
         self.assertIn("Explanation is empty", val.errors)
 
+    # 21. Prompt 14C §5 Adversarial Semantic Field Swapping (Tests A through L)
+    def test_21_adversarial_semantic_field_swapping_tests_a_through_l(self) -> None:
+        fe_base = FinancialEvidence(
+            safety_floor=Decimal("500"),
+            requested_amount=Decimal("1000"),
+            desired_completion_date=date(2026, 12, 1),
+            baseline_minimum_available_cash=Decimal("750"),
+            post_action_minimum_available_cash=Decimal("750"),
+            limiting_date=date(2026, 11, 20),
+            total_amount_paid=Decimal("1000"),
+            financing_fee=Decimal("25"),
+            payment_count=1,
+            completion_date=date(2026, 11, 15),
+        )
+        cert_base = copy.copy(self.cert_now)
+        object.__setattr__(cert_base, "requested_amount", Decimal("1000"))
+        object.__setattr__(cert_base, "amount_safe_to_pay", Decimal("500"))
+        object.__setattr__(cert_base, "recommended_payment_method", "full_payment")
+        object.__setattr__(cert_base, "affordability_status", "affordable_now")
+        object.__setattr__(cert_base, "earliest_date_for_full_payment", date(2026, 11, 15))
+        object.__setattr__(cert_base, "desired_completion_date", date(2026, 12, 1))
+        object.__setattr__(cert_base, "payment_plan", "2026-11-15:1000")
+        object.__setattr__(cert_base, "spending_changes_needed", "none")
+        object.__setattr__(cert_base, "financial_evidence", fe_base)
+
+        facts_full = build_grounded_explanation_input(cert_base, currency="INR")
+
+        # Test A: "Pay INR 1000 today." -> PASS when payment amount is authorized.
+        val_a = ExplanationValidator.validate("Pay INR 1000 today.", facts_full)
+        self.assertTrue(val_a.is_valid, f"Test A failed: {val_a.errors}")
+
+        # Test B1: "Pay INR 500 today." -> FAIL on full_payment decision (requires 1000 today).
+        val_b1 = ExplanationValidator.validate("Pay INR 500 today.", facts_full)
+        self.assertFalse(val_b1.is_valid, "Test B1 should fail on full_payment")
+
+        # Test B2: "Pay INR 500 today." -> PASS on partial_payment decision where 500 is authorized today.
+        cert_part = copy.copy(cert_base)
+        object.__setattr__(cert_part, "recommended_payment_method", "partial_payment")
+        object.__setattr__(cert_part, "amount_safe_to_pay", Decimal("500"))
+        object.__setattr__(cert_part, "earliest_date_for_full_payment", date(2026, 12, 1))
+        object.__setattr__(cert_part, "payment_plan", "2026-11-15:500|2026-12-01:500")
+        facts_part = build_grounded_explanation_input(cert_part, currency="INR")
+        val_b2 = ExplanationValidator.validate("Pay INR 500 today and the remaining INR 500 on 1 December 2026.", facts_part)
+        self.assertTrue(val_b2.is_valid, f"Test B2 failed: {val_b2.errors}")
+
+        # Test C: "The safety floor is INR 500." -> PASS.
+        val_c = ExplanationValidator.validate("The safety floor is INR 500.", facts_full)
+        self.assertTrue(val_c.is_valid, f"Test C failed: {val_c.errors}")
+
+        # Test D: "The safety floor is INR 1000." -> MUST FAIL (1000 is requested_amount, not safety floor).
+        val_d = ExplanationValidator.validate("The safety floor is INR 1000.", facts_full)
+        self.assertFalse(val_d.is_valid, "Test D should fail because 1000 is not the safety floor")
+        self.assertTrue(any("SAFETY_FLOOR" in err for err in val_d.errors))
+
+        # Test E: "The minimum available cash is INR 750." -> PASS.
+        val_e = ExplanationValidator.validate("The minimum available cash is INR 750.", facts_full)
+        self.assertTrue(val_e.is_valid, f"Test E failed: {val_e.errors}")
+
+        # Test F: "The minimum available cash is INR 500." -> MUST FAIL (500 is safety floor, not min available cash).
+        val_f = ExplanationValidator.validate("The minimum available cash is INR 500.", facts_full)
+        self.assertFalse(val_f.is_valid, "Test F should fail because min available cash is 750, not 500")
+        self.assertTrue(any("MINIMUM_AVAILABLE_CASH" in err for err in val_f.errors))
+
+        # Test G: "The financing fee is INR 25." -> PASS.
+        val_g = ExplanationValidator.validate("The financing fee is INR 25.", facts_full)
+        self.assertTrue(val_g.is_valid, f"Test G failed: {val_g.errors}")
+
+        # Test H: "The financing fee is INR 500." -> MUST FAIL (500 is safety floor, not financing fee).
+        val_h = ExplanationValidator.validate("The financing fee is INR 500.", facts_full)
+        self.assertFalse(val_h.is_valid, "Test H should fail because financing fee is 25, not 500")
+        self.assertTrue(any("FINANCING_FEE" in err for err in val_h.errors))
+
+        # Test I: "Increase spending by INR 500." -> MUST FAIL unless explicit spending action authorizes it.
+        val_i = ExplanationValidator.validate("Increase spending by INR 500.", facts_full)
+        self.assertFalse(val_i.is_valid, "Test I should fail because increasing spending is unauthorized")
+
+        # Test J1: "Reduce spending to INR 500." -> MUST FAIL when spending_changes_needed is "none".
+        val_j1 = ExplanationValidator.validate("Reduce spending to INR 500.", facts_full)
+        self.assertFalse(val_j1.is_valid, "Test J1 should fail because spending_changes_needed is 'none'")
+
+        # Test J2: "Reduce spending to INR 500." -> PASS when explicit reduce_to=500 fact exists.
+        cert_spend = copy.copy(cert_base)
+        object.__setattr__(cert_spend, "spending_changes_needed", "reduce_to:event_1:500")
+        facts_spend = build_grounded_explanation_input(cert_spend, currency="INR")
+        val_j2 = ExplanationValidator.validate("Reduce spending to INR 500.", facts_spend)
+        self.assertTrue(val_j2.is_valid, f"Test J2 failed: {val_j2.errors}")
+
+        # Test K: "Pay INR 1000 in 3 installments." -> Validates BOTH amount semantics and installment semantics.
+        cert_inst3 = copy.copy(cert_base)
+        fe_inst3 = FinancialEvidence(
+            safety_floor=Decimal("500"),
+            requested_amount=Decimal("1000"),
+            desired_completion_date=date(2026, 12, 1),
+            baseline_minimum_available_cash=Decimal("750"),
+            total_amount_paid=Decimal("1000"),
+            financing_fee=Decimal("0"),
+            payment_count=3,
+        )
+        object.__setattr__(cert_inst3, "recommended_payment_method", "installments")
+        object.__setattr__(cert_inst3, "payment_plan", "2026-10-01:333.33|2026-11-01:333.33|2026-12-01:333.34")
+        object.__setattr__(cert_inst3, "financial_evidence", fe_inst3)
+        facts_inst3 = build_grounded_explanation_input(cert_inst3, currency="INR")
+        val_k = ExplanationValidator.validate("Pay INR 1000 in 3 installments.", facts_inst3)
+        self.assertTrue(val_k.is_valid, f"Test K failed: {val_k.errors}")
+
+        # Test L: "Pay INR 500 in 4 installments." -> MUST FAIL if 4 is unauthorized.
+        val_l = ExplanationValidator.validate("Pay INR 500 in 4 installments.", facts_inst3)
+        self.assertFalse(val_l.is_valid, "Test L should fail because 4 installments is unauthorized")
+        self.assertTrue(any("installment count" in err.lower() for err in val_l.errors))
+
+    # 22. Prompt 14C §6 Date Semantic Tests
+    def test_22_adversarial_date_field_swapping(self) -> None:
+        fe_date = FinancialEvidence(
+            safety_floor=Decimal("500"),
+            requested_amount=Decimal("1000"),
+            desired_completion_date=date(2026, 12, 1),
+            baseline_minimum_available_cash=Decimal("750"),
+            limiting_date=date(2026, 11, 20),
+            total_amount_paid=Decimal("1000"),
+            completion_date=date(2026, 11, 15),
+        )
+        cert_date = copy.copy(self.cert_now)
+        object.__setattr__(cert_date, "earliest_date_for_full_payment", date(2026, 11, 15))
+        object.__setattr__(cert_date, "financial_evidence", fe_date)
+        facts = build_grounded_explanation_input(cert_date, currency="INR")
+
+        # PASS: Desired completion date
+        val_1 = ExplanationValidator.validate("The request should be completed by 1 December 2026.", facts)
+        self.assertTrue(val_1.is_valid, f"Desired date failed: {val_1.errors}")
+
+        # MUST FAIL: Earliest safe payment date is 15 Nov, NOT 1 Dec
+        val_2 = ExplanationValidator.validate("The earliest safe payment date is 1 December 2026.", facts)
+        self.assertFalse(val_2.is_valid, "Earliest date with 1 Dec should fail")
+        self.assertTrue(any("EARLIEST_FULL_PAYMENT_DATE" in err for err in val_2.errors))
+
+        # PASS: Correct earliest safe payment date
+        val_3 = ExplanationValidator.validate("The earliest safe payment date is 15 November 2026.", facts)
+        self.assertTrue(val_3.is_valid, f"Correct earliest date failed: {val_3.errors}")
+
+        # MUST FAIL: Limiting date is 20 Nov, NOT 1 Dec
+        val_4 = ExplanationValidator.validate("The limiting date is 1 December 2026.", facts)
+        self.assertFalse(val_4.is_valid, "Limiting date with 1 Dec should fail")
+        self.assertTrue(any("LIMITING_DATE" in err for err in val_4.errors))
+
+        # PASS: Correct limiting date
+        val_5 = ExplanationValidator.validate("The limiting date is 20 November 2026.", facts)
+        self.assertTrue(val_5.is_valid, f"Correct limiting date failed: {val_5.errors}")
+
+    # 23. Prompt 14C §7 Payment-Method Semantics
+    def test_23_payment_method_semantics(self) -> None:
+        # Decision: affordable_now + full_payment
+        facts_full = build_grounded_explanation_input(self.cert_now, currency="ZAR")
+        self.assertTrue(ExplanationValidator.validate("Pay in full today.", facts_full).is_valid)
+        self.assertFalse(ExplanationValidator.validate("Use 3 installments.", facts_full).is_valid)
+        self.assertFalse(ExplanationValidator.validate("Wait until the safe date.", facts_full).is_valid)
+
+        # Decision: affordable_later + wait
+        cert_wait = copy.copy(self.cert_now)
+        object.__setattr__(cert_wait, "affordability_status", "affordable_later")
+        object.__setattr__(cert_wait, "recommended_payment_method", "wait")
+        object.__setattr__(cert_wait, "earliest_date_for_full_payment", date(2024, 3, 3))
+        facts_wait = build_grounded_explanation_input(cert_wait, currency="ZAR")
+        self.assertTrue(ExplanationValidator.validate("Pay ZAR 25,256 in full on 3 March 2024.", facts_wait).is_valid)
+        self.assertFalse(ExplanationValidator.validate("Use installments.", facts_wait).is_valid)
+        self.assertFalse(ExplanationValidator.validate("Pay today.", facts_wait).is_valid)
+
+        # Decision: not_affordable + not_recommended
+        cert_not = copy.copy(self.cert_now)
+        object.__setattr__(cert_not, "affordability_status", "not_affordable")
+        object.__setattr__(cert_not, "recommended_payment_method", "not_recommended")
+        object.__setattr__(cert_not, "payment_plan", "none")
+        facts_not = build_grounded_explanation_input(cert_not, currency="ZAR")
+        self.assertTrue(ExplanationValidator.validate("Do not make this payment by 20 March 2024.", facts_not).is_valid)
+        self.assertFalse(ExplanationValidator.validate("Pay the full amount today.", facts_not).is_valid)
+        self.assertFalse(ExplanationValidator.validate("Use installments.", facts_not).is_valid)
+
+    # 24. Prompt 14C §8 Spending-Change Semantics
+    def test_24_spending_change_semantics(self) -> None:
+        facts_none = build_grounded_explanation_input(self.cert_now, currency="ZAR")
+        # When spending_changes_needed is "none", any asserted spending change fails
+        self.assertFalse(ExplanationValidator.validate("Increase spending by ZAR 500.", facts_none).is_valid)
+        self.assertFalse(ExplanationValidator.validate("Reduce spending by ZAR 500.", facts_none).is_valid)
+        self.assertFalse(ExplanationValidator.validate("Reduce spending to ZAR 500.", facts_none).is_valid)
+
+    # 25. Prompt 14C §14 Equivalent Numbers and Dates Collision
+    def test_25_equivalent_numbers_and_dates_collision(self) -> None:
+        fe_equiv = FinancialEvidence(
+            safety_floor=Decimal("1000"),
+            requested_amount=Decimal("1000"),
+            desired_completion_date=date(2026, 11, 15),
+            baseline_minimum_available_cash=Decimal("1000"),
+            post_action_minimum_available_cash=Decimal("1000"),
+            limiting_date=date(2026, 11, 20),
+            total_amount_paid=Decimal("1000"),
+            financing_fee=Decimal("0"),
+            payment_count=1,
+            completion_date=date(2026, 11, 15),
+        )
+        cert_equiv = copy.copy(self.cert_now)
+        object.__setattr__(cert_equiv, "requested_amount", Decimal("1000"))
+        object.__setattr__(cert_equiv, "amount_safe_to_pay", Decimal("1000"))
+        object.__setattr__(cert_equiv, "earliest_date_for_full_payment", date(2026, 11, 15))
+        object.__setattr__(cert_equiv, "desired_completion_date", date(2026, 11, 15))
+        object.__setattr__(cert_equiv, "payment_plan", "2026-11-15:1000")
+        object.__setattr__(cert_equiv, "financial_evidence", fe_equiv)
+        facts = build_grounded_explanation_input(cert_equiv, currency="INR")
+
+        # 1. Number collision: 1000 is both requested_amount and safety_floor
+        val_floor = ExplanationValidator.validate("The safety floor is INR 1000.", facts)
+        self.assertTrue(val_floor.is_valid, f"Safety floor bound to 1000 should pass: {val_floor.errors}")
+
+        # But 1000 CANNOT be claimed as the financing fee (fee is 0)
+        val_fee = ExplanationValidator.validate("The financing fee is INR 1000.", facts)
+        self.assertFalse(val_fee.is_valid, "Financing fee bound to 1000 must fail")
+        self.assertTrue(any("FINANCING_FEE" in err for err in val_fee.errors))
+
+        # 2. Date collision: 2026-11-15 is both desired completion date and earliest payment date
+        val_earliest = ExplanationValidator.validate("The earliest safe payment date is 15 November 2026.", facts)
+        self.assertTrue(val_earliest.is_valid, f"Earliest date should pass: {val_earliest.errors}")
+
+        # But 2026-11-15 CANNOT be claimed as limiting date (limiting date is 20 November 2026)
+        val_limit = ExplanationValidator.validate("The limiting date is 15 November 2026.", facts)
+        self.assertFalse(val_limit.is_valid, "Limiting date bound to 15 November must fail")
+        self.assertTrue(any("LIMITING_DATE" in err for err in val_limit.errors))
+
 
 if __name__ == "__main__":
     unittest.main()
+
