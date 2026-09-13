@@ -69,7 +69,7 @@ class TestSpendingChangesEligibility(unittest.TestCase):
         category: str,
         amount: str,
         flexibility: str,
-        min_allowed: str = "0.00",
+        min_allowed: Optional[str] = None,
         is_protected: bool = False,
         is_cancelled: bool = False,
         direction: Direction = Direction.OUTFLOW,
@@ -582,5 +582,202 @@ class TestSpendingChangesCandidateIntegration(unittest.TestCase):
         self.assertEqual(len(ranked.top_candidate.spending_changes), 0)
 
 
+
+class TestPrompt17CBoundaryAndCap(unittest.TestCase):
+    """Prompt 17C Forensic Audit: Boundary Matrix, Zero-Minimum Contract, and 3-Change Cap."""
+
+    def setUp(self) -> None:
+        self.user_id = "user_test_boundary"
+        self.req_date = date(2025, 1, 1)
+        self.sim_end = date(2025, 4, 1)
+        self.profile = FinancialProfile(
+            user_id=self.user_id,
+            home_currency="USD",
+            current_available_balance=Decimal("1000.00"),
+            minimum_balance_to_keep=Decimal("100.00"),
+            financial_priorities=("essential_expenses",),
+            payment_methods_user_will_consider=("full_payment",),
+            expense_categories_user_is_willing_to_reduce=("dining",),
+            expense_categories_user_is_willing_to_stop=("dining",),
+            expense_categories_to_protect=(),
+            max_installment_months=12,
+        )
+
+    def _eval_min_allowed(self, orig: Decimal, min_allowed: Decimal) -> Tuple[bool, Optional[Decimal], bool, bool]:
+        """Helper to evaluate boundary conditions. Returns (can_reduce, mod_amt, stop_avail, reduce_avail)."""
+        series = RecurrenceSeries(
+            series_id="s_bound",
+            user_id=self.user_id,
+            direction=Direction.OUTFLOW,
+            category="dining",
+            event_type="purchase",
+            description="Dining expense",
+            frequency=RecurrenceFrequency.MONTHLY,
+            interval_days=None,
+            day_of_month=5,
+            historical_event_ids=("ev_h1", "ev_h2"),
+            historical_count=2,
+            anchor_event_id="ev_anchor",
+            anchor_date=date(2024, 12, 5),
+            forecast_amount=orig,
+            currency="USD",
+            amount_rule="exact_stable",
+            flexibility="reducible_or_stoppable",
+            minimum_allowed_amount=min_allowed,
+        )
+        fe = FutureEvent(
+            event_id="fe_bound_1",
+            user_id=self.user_id,
+            effective_date=date(2025, 1, 5),
+            direction=Direction.OUTFLOW,
+            amount_home=orig,
+            currency="USD",
+            category="dining",
+            event_type="purchase",
+            description="Dining expense",
+            series_id="s_bound",
+            frequency=RecurrenceFrequency.MONTHLY,
+            anchor_event_id="ev_anchor",
+        )
+        actions = identify_eligible_spending_actions(
+            user_id=self.user_id,
+            request_date=self.req_date,
+            simulation_end=self.sim_end,
+            profile=self.profile,
+            series_list=[series],
+            canonical_events=[],
+            future_events=[fe],
+        )
+        stop_avail = any(a.action_type == SpendingActionType.STOP for a in actions)
+        reduce_actions = [a for a in actions if a.action_type == SpendingActionType.REDUCE_TO]
+        reduce_avail = len(reduce_actions) > 0
+        mod_amt = reduce_actions[0].modified_amount if reduce_avail else None
+        can_reduce = reduce_avail
+        return can_reduce, mod_amt, stop_avail, reduce_avail
+
+    def test_minimum_amount_boundary_matrix(self) -> None:
+        """Prompt 17C Section 3: Test boundary matrix for original=100."""
+        orig = Decimal("100")
+
+        # 1. minimum = 100 (min == orig) -> reduction ineligible (saves 0)
+        can_red, mod, stop_ok, red_ok = self._eval_min_allowed(orig, Decimal("100"))
+        self.assertFalse(can_red)
+        self.assertIsNone(mod)
+        self.assertFalse(red_ok)
+        self.assertTrue(stop_ok)
+
+        # 2. minimum = 99.99 (min = orig - 0.01) -> reduction eligible
+        can_red, mod, stop_ok, red_ok = self._eval_min_allowed(orig, Decimal("99.99"))
+        self.assertTrue(can_red)
+        self.assertEqual(mod, Decimal("99.99"))
+        self.assertTrue(red_ok)
+        self.assertTrue(stop_ok)
+
+        # 3. minimum = 50 -> reduction eligible
+        can_red, mod, stop_ok, red_ok = self._eval_min_allowed(orig, Decimal("50"))
+        self.assertTrue(can_red)
+        self.assertEqual(mod, Decimal("50"))
+        self.assertTrue(red_ok)
+        self.assertTrue(stop_ok)
+
+        # 4. minimum = 0.01 -> reduction eligible
+        can_red, mod, stop_ok, red_ok = self._eval_min_allowed(orig, Decimal("0.01"))
+        self.assertTrue(can_red)
+        self.assertEqual(mod, Decimal("0.01"))
+        self.assertTrue(red_ok)
+        self.assertTrue(stop_ok)
+
+        # 5. minimum = 0 -> reduction ineligible (contract requires 0 < modified < original; 0 is STOP)
+        can_red, mod, stop_ok, red_ok = self._eval_min_allowed(orig, Decimal("0"))
+        self.assertFalse(can_red)
+        self.assertIsNone(mod)
+        self.assertFalse(red_ok)
+        self.assertTrue(stop_ok)
+
+        # 6. minimum = -0.01 -> reduction ineligible (negative minimum invalid)
+        can_red, mod, stop_ok, red_ok = self._eval_min_allowed(orig, Decimal("-0.01"))
+        self.assertFalse(can_red)
+        self.assertIsNone(mod)
+        self.assertFalse(red_ok)
+        self.assertTrue(stop_ok)
+
+        # 7. minimum = 100.01 -> reduction ineligible (min > orig)
+        can_red, mod, stop_ok, red_ok = self._eval_min_allowed(orig, Decimal("100.01"))
+        self.assertFalse(can_red)
+        self.assertIsNone(mod)
+        self.assertFalse(red_ok)
+        self.assertTrue(stop_ok)
+
+    def test_spending_change_type_and_boundary_invariants(self) -> None:
+        """SpendingChange dataclass enforces strict typing and boundary invariants."""
+        d = date(2025, 1, 10)
+        # REDUCE_TO with modified_amount = 0 must raise ValueError
+        with self.assertRaises(ValueError):
+            SpendingChange("e1", "s1", SpendingActionType.REDUCE_TO, Decimal("100"), Decimal("0"), d, "dining", Decimal("100"), "desc")
+
+        # REDUCE_TO with modified_amount < 0 must raise ValueError
+        with self.assertRaises(ValueError):
+            SpendingChange("e1", "s1", SpendingActionType.REDUCE_TO, Decimal("100"), Decimal("-5"), d, "dining", Decimal("105"), "desc")
+
+        # REDUCE_TO with modified_amount == original_amount must raise ValueError
+        with self.assertRaises(ValueError):
+            SpendingChange("e1", "s1", SpendingActionType.REDUCE_TO, Decimal("100"), Decimal("100"), d, "dining", Decimal("0"), "desc")
+
+        # REDUCE_TO with modified_amount > original_amount must raise ValueError
+        with self.assertRaises(ValueError):
+            SpendingChange("e1", "s1", SpendingActionType.REDUCE_TO, Decimal("100"), Decimal("105"), d, "dining", Decimal("-5"), "desc")
+
+        # STOP with modified_amount != 0 must raise ValueError
+        with self.assertRaises(ValueError):
+            SpendingChange("e1", "s1", SpendingActionType.STOP, Decimal("100"), Decimal("10"), d, "dining", Decimal("90"), "desc")
+
+        # Valid STOP succeeds
+        stop_c = SpendingChange("e1", "s1", SpendingActionType.STOP, Decimal("100"), Decimal("0"), d, "dining", Decimal("100"), "desc")
+        self.assertEqual(stop_c.to_action_string(), "stop:e1")
+
+        # Valid REDUCE_TO succeeds
+        red_c = SpendingChange("e1", "s1", SpendingActionType.REDUCE_TO, Decimal("100"), Decimal("40"), d, "dining", Decimal("60"), "desc")
+        self.assertEqual(red_c.to_action_string(), "reduce_to:e1:40")
+
+    def test_three_change_cap_adversarial(self) -> None:
+        """Prompt 17C Section 6: Adversarial test with 5 eligible flexible events."""
+        d = date(2025, 1, 10)
+        # Create 5 distinct eligible flexible actions across 5 events
+        actions = [
+            SpendingChange(f"ev_{i}", f"s_{i}", SpendingActionType.STOP, Decimal("100"), Decimal("0"), d, "dining", Decimal("100"), f"Stop {i}")
+            for i in range(1, 6)
+        ]
+        self.assertEqual(len(actions), 5)
+
+        scenarios = generate_spending_change_scenarios(actions, max_changes=3)
+
+        # 1. 4-change candidate is never generated
+        self.assertTrue(all(len(sc.changes) <= 3 for sc in scenarios))
+        self.assertEqual(max(len(sc.changes) for sc in scenarios), 3)
+
+        # 2. 1, 2, 3 change counts match exact combinations:
+        # C(5, 1) = 5
+        # C(5, 2) = 10
+        # C(5, 3) = 10
+        # Total = 25 scenarios
+        k1 = sum(1 for sc in scenarios if len(sc.changes) == 1)
+        k2 = sum(1 for sc in scenarios if len(sc.changes) == 2)
+        k3 = sum(1 for sc in scenarios if len(sc.changes) == 3)
+        self.assertEqual(k1, 5)
+        self.assertEqual(k2, 10)
+        self.assertEqual(k3, 10)
+        self.assertEqual(len(scenarios), 25)
+
+        # 3. No scenario contains duplicate event IDs
+        for sc in scenarios:
+            eids = [c.event_id for c in sc.changes]
+            self.assertEqual(len(eids), len(set(eids)))
+
+        # 4. Deterministic ordering is strictly preserved
+        for i in range(len(scenarios) - 1):
+            self.assertLessEqual(scenarios[i].disruption_tuple, scenarios[i + 1].disruption_tuple)
+
+
 if __name__ == "__main__":
     unittest.main()
+

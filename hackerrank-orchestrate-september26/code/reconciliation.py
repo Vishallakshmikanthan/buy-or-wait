@@ -1,5 +1,6 @@
 """Deterministic evidence reconciliation and canonical ledger construction."""
 
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from enum import Enum
@@ -12,10 +13,21 @@ from .canonical import (
     Direction,
     RecurrenceClassification,
 )
+from .message_interpretation import (
+    MessageAction,
+    MessageActionType,
+    MessageReconciliationRecord,
+    TargetType,
+    UnresolvedMessageAction,
+    interpret_and_link_messages,
+    parse_single_message,
+    resolve_message_conflicts,
+)
 from .models import (
     ExchangeRate,
     FinancialEvent,
     FinancialProfile,
+    FinancialRequest,
     ImageMetadata,
     Message,
 )
@@ -34,6 +46,15 @@ class ActionType(str, Enum):
 class ExchangeRateNotFoundError(ValidationError):
     """Raised when an exact dated exchange rate is missing for a foreign-currency cash event."""
     pass
+
+
+@dataclass(frozen=True)
+class ReconciliationResult:
+    """Immutable result of reconciling raw events and message actions into a canonical ledger."""
+    ledger: CanonicalLedger
+    message_actions: Tuple[MessageAction, ...]
+    unresolved_actions: Tuple[UnresolvedMessageAction, ...]
+    reconciliation_records: Tuple[MessageReconciliationRecord, ...]
 
 
 def _determine_effective_date(
@@ -141,30 +162,82 @@ def reconcile_single_event(
     exchange_rate_map: Dict[Tuple[date, str, str], Decimal],
     linked_messages: Sequence[Message],
     linked_image: Optional[ImageMetadata] = None,
+    linked_actions: Optional[Sequence[MessageAction]] = None,
 ) -> CanonicalEvent:
-    """Reconcile one raw FinancialEvent into a CanonicalEvent with evidence chain."""
+    """Reconcile one raw FinancialEvent into a CanonicalEvent with evidence chain.
+
+    Applies structured MessageActions (CANCEL, AMEND_AMOUNT, DELAY_TO, CONFIRM)
+    with full provenance retention in evidence_chain and applied_actions.
+    """
     evidence: List[str] = [f"Source: financial_events.csv row {event.source_row}"]
     actions: List[str] = []
 
-    # 1. Evaluate linked messages
+    # 1. Evaluate linked messages / actions
     status = event.status
     amount_original = event.amount
     settlement_date = event.settlement_date
     event_date = event.event_date
 
-    # Sort messages chronologically by sent_at for deterministic precedence
-    sorted_messages = sorted(linked_messages, key=lambda m: m.sent_at)
-    for msg in sorted_messages:
-        text_lower = msg.message_text.lower()
-        evidence.append(f"Message {msg.message_id} ({msg.source_type} at {msg.sent_at.isoformat()}): {msg.message_text}")
+    # Determine actions to apply
+    resolved_actions: List[MessageAction] = []
+    if linked_actions is not None:
+        resolved_actions = list(linked_actions)
+    elif linked_messages:
+        # Construct and resolve actions from linked messages
+        raw_acts: List[MessageAction] = []
+        for msg in linked_messages:
+            act_type, amt, curr, eff_d, pct, reason = parse_single_message(msg)
+            raw_acts.append(
+                MessageAction(
+                    message_id=msg.message_id,
+                    action_type=act_type,
+                    request_id=msg.request_id,
+                    user_id=msg.user_id,
+                    related_event_id=event.event_id,
+                    target_type=TargetType.EVENT,
+                    target_id=event.event_id,
+                    target_description=event.description,
+                    effective_date=eff_d or event.event_date,
+                    new_amount=amt,
+                    old_amount=event.amount,
+                    currency=curr or event.currency,
+                    confidence=Decimal("1.00"),
+                    evidence_text_reference=f"Message {msg.message_id} ({msg.source_type} at {msg.sent_at.isoformat()}): {msg.message_text}",
+                    reason=reason,
+                    is_applied=True,
+                )
+            )
+        resolved_actions = resolve_message_conflicts(raw_acts)
 
-        # Check for explicit cancellation
-        if any(w in text_lower for w in ["dibatalkan", "cancelled", "transaction cancelled", "payment cancelled"]):
+    for act in resolved_actions:
+        evidence.append(
+            f"Message {act.message_id} ({act.action_type.value}): {act.evidence_text_reference} - {act.reason}"
+        )
+
+        if act.action_type == MessageActionType.CANCEL:
             status = "cancelled"
-            actions.append(ActionType.CANCEL.value)
-        # Check for explicit confirmation of dispute, failure, or claim closure
-        elif any(w in text_lower for w in ["investigated", "failed", "closed", "tidak ada", "selesai", "pending"]):
-            actions.append(ActionType.CONFIRM.value)
+            if ActionType.CANCEL.value not in actions:
+                actions.append(ActionType.CANCEL.value)
+
+        elif act.action_type == MessageActionType.AMEND_AMOUNT:
+            if act.new_amount is not None and act.new_amount > Decimal("0"):
+                orig_val = str(amount_original)
+                amount_original = act.new_amount
+                if ActionType.AMEND_AMOUNT.value not in actions:
+                    actions.append(ActionType.AMEND_AMOUNT.value)
+                evidence.append(f"Amount amended from {orig_val} to {act.new_amount} {act.currency or event.currency}")
+
+        elif act.action_type == MessageActionType.DELAY_TO:
+            if act.effective_date is not None:
+                orig_d = str(settlement_date or event_date)
+                settlement_date = act.effective_date
+                if ActionType.DELAY.value not in actions:
+                    actions.append(ActionType.DELAY.value)
+                evidence.append(f"Effective date delayed from {orig_d} to {act.effective_date}")
+
+        elif act.action_type == MessageActionType.CONFIRM:
+            if ActionType.CONFIRM.value not in actions:
+                actions.append(ActionType.CONFIRM.value)
 
     # 2. Check for missing image-backed amount
     is_unresolved = False
@@ -251,14 +324,15 @@ def reconcile_single_event(
     )
 
 
-def reconcile_events(
+def reconcile_events_with_audit(
     events: Sequence[FinancialEvent],
     profiles: Dict[str, FinancialProfile],
     exchange_rates: Sequence[ExchangeRate],
     messages: Sequence[Message],
     images: Sequence[ImageMetadata],
-) -> CanonicalLedger:
-    """Reconcile all raw financial events into a deterministic CanonicalLedger.
+    requests: Optional[Sequence[FinancialRequest]] = None,
+) -> ReconciliationResult:
+    """Reconcile raw events and messages into a CanonicalLedger with full audit lineage.
 
     Args:
         events: Raw FinancialEvent records from CSV.
@@ -266,25 +340,45 @@ def reconcile_events(
         exchange_rates: Fixed dated conversion rates.
         messages: Supporting message evidence.
         images: Image metadata links.
+        requests: Optional financial requests for linkage context.
 
     Returns:
-        CanonicalLedger containing indexed, verified CanonicalEvents.
+        ReconciliationResult containing CanonicalLedger and complete message audit trail.
     """
     # Build lookup maps
     rate_map: Dict[Tuple[date, str, str], Decimal] = {
         (r.rate_date, r.from_currency, r.to_currency): r.rate for r in exchange_rates
     }
 
+    images_by_event: Dict[str, ImageMetadata] = {
+        img.related_event_id: img for img in images
+    }
+
+    # 1. Deterministic Message Interpretation & Linkage
+    req_list = requests or []
+    message_actions, unresolved_actions = interpret_and_link_messages(
+        messages=messages,
+        events=events,
+        requests=req_list,
+        profiles=profiles,
+    )
+
+    # Index event-targeted actions by target_id
+    actions_by_event: Dict[str, List[MessageAction]] = {}
+    for act in message_actions:
+        if act.target_type == TargetType.EVENT and act.target_id:
+            actions_by_event.setdefault(act.target_id, []).append(act)
+
+    # Fallback message mapping by related_event_id for backward compatibility
     messages_by_event: Dict[str, List[Message]] = {}
     for msg in messages:
         if msg.related_event_id:
             messages_by_event.setdefault(msg.related_event_id, []).append(msg)
 
-    images_by_event: Dict[str, ImageMetadata] = {
-        img.related_event_id: img for img in images
-    }
-
+    # 2. Reconcile events
     canonical_events: List[CanonicalEvent] = []
+    audit_records: List[MessageReconciliationRecord] = []
+
     for event in events:
         profile = profiles.get(event.user_id)
         if profile is None:
@@ -294,6 +388,7 @@ def reconcile_events(
 
         linked_msgs = messages_by_event.get(event.event_id, [])
         linked_img = images_by_event.get(event.event_id)
+        event_acts = actions_by_event.get(event.event_id, [])
 
         canon = reconcile_single_event(
             event=event,
@@ -301,7 +396,50 @@ def reconcile_events(
             exchange_rate_map=rate_map,
             linked_messages=linked_msgs,
             linked_image=linked_img,
+            linked_actions=event_acts if event_acts else None,
         )
         canonical_events.append(canon)
 
-    return CanonicalLedger(events=canonical_events)
+        # Record audit entries for applied actions
+        for act in event_acts:
+            audit_records.append(
+                MessageReconciliationRecord(
+                    message_id=act.message_id,
+                    action_type=act.action_type.value,
+                    target_id=event.event_id,
+                    original_value=str(act.old_amount) if act.old_amount is not None else None,
+                    new_value=str(act.new_amount) if act.new_amount is not None else None,
+                    effective_date=act.effective_date,
+                    reason=act.reason or "applied_event_action",
+                )
+            )
+
+    ledger = CanonicalLedger(events=canonical_events)
+    return ReconciliationResult(
+        ledger=ledger,
+        message_actions=tuple(message_actions),
+        unresolved_actions=tuple(unresolved_actions),
+        reconciliation_records=tuple(audit_records),
+    )
+
+
+def reconcile_events(
+    events: Sequence[FinancialEvent],
+    profiles: Dict[str, FinancialProfile],
+    exchange_rates: Sequence[ExchangeRate],
+    messages: Sequence[Message],
+    images: Sequence[ImageMetadata],
+    requests: Optional[Sequence[FinancialRequest]] = None,
+) -> CanonicalLedger:
+    """Reconcile all raw financial events into a deterministic CanonicalLedger.
+
+    Backward-compatible entry point returning CanonicalLedger.
+    """
+    return reconcile_events_with_audit(
+        events=events,
+        profiles=profiles,
+        exchange_rates=exchange_rates,
+        messages=messages,
+        images=images,
+        requests=requests,
+    ).ledger

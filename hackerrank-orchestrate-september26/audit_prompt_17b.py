@@ -270,7 +270,7 @@ def audit_section_3_minimum_allowed_amount() -> bool:
         (Decimal("100"), Decimal("100"), False, None),  # min == orig -> no reduction possible
         (Decimal("100"), Decimal("105"), False, None),  # min > orig -> invalid
         (Decimal("100"), Decimal("99.99"), True, Decimal("99.99")),  # min = orig - 0.01
-        (Decimal("100"), Decimal("0"), True, Decimal("0")),  # min = 0
+        (Decimal("100"), Decimal("0"), False, None),  # min = 0 -> reduction rejected (must be STOP)
         (Decimal("100"), Decimal("-10"), False, None),  # negative min -> rejected
     ]
 
@@ -469,7 +469,7 @@ def audit_section_8_optimization_objective() -> bool:
     d1 = date(2025, 1, 10)
     d2 = date(2025, 1, 15)
 
-    c1 = SpendingChange("e1", "s1", SpendingActionType.REDUCE_TO, Decimal("100"), Decimal("0"), d1, "cat", Decimal("100"), "desc")
+    c1 = SpendingChange("e1", "s1", SpendingActionType.REDUCE_TO, Decimal("110"), Decimal("10"), d1, "cat", Decimal("100"), "desc")
     c2 = SpendingChange("e2", "s2", SpendingActionType.REDUCE_TO, Decimal("50"), Decimal("10"), d1, "cat", Decimal("40"), "desc")
     c3 = SpendingChange("e3", "s3", SpendingActionType.REDUCE_TO, Decimal("50"), Decimal("10"), d2, "cat", Decimal("40"), "desc")
     c_stop = SpendingChange("e4", "s4", SpendingActionType.STOP, Decimal("100"), Decimal("0"), d1, "cat", Decimal("100"), "desc")

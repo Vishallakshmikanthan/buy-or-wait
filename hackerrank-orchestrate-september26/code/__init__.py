@@ -18,9 +18,22 @@ from .canonical import (
 )
 from .reconciliation import (
     reconcile_events,
+    reconcile_events_with_audit,
     reconcile_single_event,
     ActionType,
     ExchangeRateNotFoundError,
+    ReconciliationResult,
+)
+from .message_interpretation import (
+    MessageAction,
+    MessageActionType,
+    MessageReconciliationRecord,
+    TargetType,
+    UnresolvedMessageAction,
+    interpret_and_link_messages,
+    apply_message_actions_to_series,
+    apply_message_actions_to_future_events,
+    adapt_recurrence_and_future_events,
 )
 from .image_resolution import (
     ImageExtractionResult,
@@ -97,9 +110,20 @@ __all__ = [
     "CashImpactType",
     "RecurrenceClassification",
     "reconcile_events",
+    "reconcile_events_with_audit",
     "reconcile_single_event",
     "ActionType",
     "ExchangeRateNotFoundError",
+    "ReconciliationResult",
+    "MessageAction",
+    "MessageActionType",
+    "MessageReconciliationRecord",
+    "TargetType",
+    "UnresolvedMessageAction",
+    "interpret_and_link_messages",
+    "apply_message_actions_to_series",
+    "apply_message_actions_to_future_events",
+    "adapt_recurrence_and_future_events",
     "ImageExtractionResult",
     "IMAGE_DOCUMENT_PROFILES",
     "extract_all_images",

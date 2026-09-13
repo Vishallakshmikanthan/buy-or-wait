@@ -106,6 +106,15 @@ class SpendingChange:
             )
         if self.action_type == SpendingActionType.STOP and self.modified_amount != Decimal("0"):
             raise ValueError(f"STOP action must have modified_amount=0, got {self.modified_amount}")
+        if self.action_type == SpendingActionType.REDUCE_TO:
+            if self.modified_amount <= Decimal("0"):
+                raise ValueError(
+                    f"REDUCE_TO action must have strictly positive modified_amount (> 0), got {self.modified_amount}"
+                )
+            if self.modified_amount >= self.original_amount:
+                raise ValueError(
+                    f"REDUCE_TO action must have modified_amount < original_amount ({self.original_amount}), got {self.modified_amount}"
+                )
 
     @property
     def amount_saved(self) -> Decimal:
@@ -236,7 +245,7 @@ def identify_eligible_spending_actions(
             s.category in reduce_cats
             and flex in ("reducible", "reducible_or_stoppable")
             and s.minimum_allowed_amount is not None
-            and Decimal("0") <= s.minimum_allowed_amount < s.forecast_amount
+            and Decimal("0") < s.minimum_allowed_amount < s.forecast_amount
         )
         if can_reduce:
             key = (target_eid, SpendingActionType.REDUCE_TO)
@@ -302,7 +311,7 @@ def identify_eligible_spending_actions(
             ce.category in reduce_cats
             and flex in ("reducible", "reducible_or_stoppable")
             and ce.minimum_allowed_amount_home is not None
-            and Decimal("0") <= ce.minimum_allowed_amount_home < ce_amt
+            and Decimal("0") < ce.minimum_allowed_amount_home < ce_amt
         )
         if can_reduce:
             key = (ce.event_id, SpendingActionType.REDUCE_TO)
