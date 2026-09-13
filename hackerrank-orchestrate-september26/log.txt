@@ -4378,6 +4378,52 @@ Actions:
 * verified git blob hashes of all 11 frozen modules match baselines exactly
 * updated log.txt with turn summary
 
+## [2026-09-13T08:00:00+05:30] Prompt 15 Final Output.csv Assembly and End-to-End Integration
+
+User Prompt (verbatim, secrets redacted):
+PROMPT 15 — FINAL OUTPUT.CSV ASSEMBLY + END-TO-END INTEGRATION
+
+We are now integrating the frozen deterministic financial engine, DecisionCertificate, and grounded explanation layer into the required final submission output.
+This is a HIGH-RISK integration step.
+Hard freeze on all 12 modules:
+- code/canonical.py
+- code/recurrence.py
+- code/simulator.py
+- code/safe_to_pay.py
+- code/user_state.py
+- code/affordability.py
+- code/payment_plan.py
+- code/candidate_generation.py
+- code/ranking.py
+- code/final_decision.py
+- code/decision_certificate.py
+- code/explanation.py
+
+Determine the exact required output.csv schema:
+request_id,amount_safe_to_pay,affordability_status,recommended_payment_method,payment_plan,earliest_date_for_full_payment,spending_changes_needed,decision_explanation
+
+Do not add/remove/reorder columns. Do not independently make financial decisions.
+Mechanical field mapping from FinalDecision, DecisionCertificate, ExplanationResult.
+Exact non-scientific Decimal serialization.
+Audit zero-decision cases (69 not_recommended requests).
+Cross-layer consistency validation in memory (fail-closed).
+250 evaluation requests matching dataset/requests.csv.
+100% byte-identical repeat determinism.
+Verify frozen module hashes.
+Full test suite execution.
+
+Agent Response Summary:
+Implemented minimal final integration and output assembly layer in code/output.py, generate_output.py, and updated code/main.py. Sourced every field mechanically without independent decision recomputation. Enforced exact non-scientific Decimal serialization and ISO date formatting (or empty string when no date exists per contract). Implemented CrossLayerConsistencyValidator verifying all 10 consistency checks in memory with fail-closed semantics. Added 10 integration and property tests in code/tests/test_output.py. Full test suite (545 tests) passing in ~28s. Generated authoritative output.csv at repository root (49,980 bytes, SHA-256: fadff88ed1b7722cf52d1f0863ec2a619284d02aa7beb786eaf5582c8d83db9c). Verified 100% byte-for-byte repeat-run determinism and exact decision distributions (66 full_payment, 57 installments, 8 partial_payment, 50 wait, 69 not_recommended; 66 affordable_now, 65 affordable_with_plan, 50 affordable_later, 69 not_affordable). Verified all 12 frozen module git blob hashes remain bit-for-bit unchanged.
+
+Actions:
+* created code/output.py with SCHEMA_COLUMNS, serialize_decimal, OutputRow, format_output_row, CrossLayerConsistencyValidator, and generate_all_outputs
+* created generate_output.py root entry point and updated code/main.py to forward to code.output.main
+* added code/tests/test_output.py with 10 integration and property test scenarios (545/545 tests passing in suite)
+* generated authoritative output.csv at repository root (250 rows, 49,980 bytes, SHA-256: fadff88ed1b7722cf52d1f0863ec2a619284d02aa7beb786eaf5582c8d83db9c)
+* executed comprehensive audit verifying schema exactness, row count, unique IDs, payment plan integrity, explanation grounding, decision/affordability distributions, and repeat-run byte identity
+* confirmed git blob hashes of all 12 frozen upstream modules remain bit-for-bit unchanged
+* updated log.txt with turn summary
+
 Context:
 tool=Antigravity
 branch=master

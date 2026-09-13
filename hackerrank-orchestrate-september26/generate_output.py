@@ -1,8 +1,8 @@
-"""Entry point for Buy-or-Wait solution (AGENTS.md §6.6).
+#!/usr/bin/env python3
+"""CLI runner to generate output.csv deterministically from repository root.
 
 Usage:
-    python -m code.main
-    python -m code.output
+    python generate_output.py
 """
 
 from __future__ import annotations
@@ -10,7 +10,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+# Ensure repository root is on sys.path
+ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
