@@ -317,8 +317,9 @@ class TestOutputAssembly(unittest.TestCase):
                 self.assertEqual(z.spending_changes_needed, "none")
                 self.assertGreaterEqual(Decimal(z.amount_safe_to_pay), Decimal("0"))
                 self.assertTrue(len(z.decision_explanation) > 0)
-            # Exactly 6 requests have an earliest full payment date after their deadline
-            self.assertEqual(non_empty_earliest_count, 6)
+            # Exactly 4 requests have an earliest full payment date after their deadline
+            # (request_85 and request_220 shift to earliest=None under active causal salary reduction messages)
+            self.assertEqual(non_empty_earliest_count, 4)
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()

@@ -43,7 +43,13 @@ from code.final_decision import (
 )
 from code.image_resolution import extract_all_images, resolve_ledger_with_images
 from code.loaders import load_dataset
+from code.message_interpretation import (
+    MessageAction,
+    apply_message_actions_to_future_events,
+    interpret_and_link_messages,
+)
 from code.models import FinancialProfile, FinancialRequest
+from code.nemotron import NemotronAdapter, NemotronConfig
 from code.payment_plan import evaluate_payment_option_feasibility
 from code.reconciliation import reconcile_events
 from code.recurrence import detect_all_recurrence, expand_future_events
@@ -294,6 +300,7 @@ def generate_all_outputs(
     dataset_dir: Path,
     output_path: Path,
     force_fallback: bool = True,
+    nemotron_adapter: Optional[NemotronAdapter] = None,
 ) -> Tuple[List[OutputRow], str, int]:
     """Execute the end-to-end deterministic pipeline over evaluation requests.
 
@@ -301,7 +308,7 @@ def generate_all_outputs(
     2. Executes simulation, safe-to-pay, payment-plan feasibility, candidate generation,
        ranking, final decision, and decision certificate generation.
     3. Validates each certificate.
-    4. Generates and validates grounded explanation.
+    4. Generates and validates grounded explanation (via Nemotron if available, else deterministic fallback).
     5. Formats OutputRow and executes CrossLayerConsistencyValidator in memory.
     6. Verifies exact row count and unique request IDs.
     7. Writes output.csv atomically with UTF-8 encoding and LF line terminators.
@@ -315,6 +322,18 @@ def generate_all_outputs(
     all_series, _ = detect_all_recurrence(resolved_ledger, ds.profiles, ds.messages)
     user_canonical = {uid: resolved_ledger.get_events_for_user(uid) for uid in ds.profiles}
 
+    # Deterministic message interpretation and linkage
+    message_actions, _ = interpret_and_link_messages(
+        messages=ds.messages,
+        events=ds.events,
+        requests=ds.requests,
+        profiles=ds.profiles,
+    )
+    actions_by_user: Dict[str, List[MessageAction]] = {}
+    for act in message_actions:
+        if act.is_applied:
+            actions_by_user.setdefault(act.user_id, []).append(act)
+
     output_rows: List[OutputRow] = []
 
     for req in ds.requests:
@@ -324,19 +343,27 @@ def generate_all_outputs(
         end_d = start_d + timedelta(days=90)
         future_res = expand_future_events(all_series[uid], start_d, end_d, ledger=resolved_ledger)
 
+        # Apply causal message actions to future events
+        u_acts = actions_by_user.get(uid, [])
+        future_events = apply_message_actions_to_future_events(
+            future_res.future_events,
+            u_acts,
+            req.request_date,
+        )
+
         baseline = simulate_user(
             user_id=uid,
             simulation_start=start_d,
             simulation_end=end_d,
             canonical_events=user_canonical[uid],
-            future_events=future_res.future_events,
+            future_events=future_events,
             profile=profile,
         )
         cert_safe = evaluate_request_safe_to_pay(
             request=req,
             baseline_simulation=baseline,
             canonical_events=user_canonical[uid],
-            future_events=future_res.future_events,
+            future_events=future_events,
             profile=profile,
         )
         options = ds.payment_options_by_request.get(req.request_id, [])
@@ -347,7 +374,7 @@ def generate_all_outputs(
                 request=req,
                 profile=profile,
                 canonical_events=user_canonical[uid],
-                future_events=future_res.future_events,
+                future_events=future_events,
                 baseline_simulation=baseline,
             )
             for o in options
@@ -360,7 +387,7 @@ def generate_all_outputs(
             payment_option_feasibilities=feasibilities,
             payment_options_by_id=opts_by_id,
             canonical_events=user_canonical[uid],
-            future_events=future_res.future_events,
+            future_events=future_events,
             recurrence_series=all_series[uid],
         )
         ctx = RequestContext(
@@ -373,7 +400,7 @@ def generate_all_outputs(
             request=req,
             profile=profile,
             canonical_events=user_canonical[uid],
-            future_events=future_res.future_events,
+            future_events=future_events,
             baseline_simulation=baseline,
             recurring_series=all_series[uid],
         )
@@ -385,7 +412,12 @@ def generate_all_outputs(
 
         # Build GroundedExplanationInput and generate explanation
         exp_input = build_grounded_explanation_input(cert, currency=profile.home_currency)
-        exp_result = generate_grounded_explanation(exp_input, force_fallback=force_fallback)
+        exp_result = generate_grounded_explanation(
+            exp_input,
+            certificate=cert,
+            nemotron_adapter=nemotron_adapter,
+            force_fallback=force_fallback,
+        )
 
         # Format and validate row in memory
         row = format_output_row(req, dec, cert, exp_result)
@@ -437,8 +469,18 @@ def main() -> None:
     dataset_dir = root / "dataset"
     output_csv = root / "output.csv"
 
+    cfg = NemotronConfig.from_env()
+    adapter = NemotronAdapter(cfg) if cfg.is_available else None
+    force_fallback = not cfg.is_available
+
     print(f"Generating output.csv from {dataset_dir} -> {output_csv} ...")
-    rows, sha256, size = generate_all_outputs(dataset_dir, output_csv, force_fallback=True)
+    print(f"Nemotron mode: {'ONLINE (' + cfg.model + ')' if cfg.is_available else 'OFFLINE (deterministic fallback)'}")
+    rows, sha256, size = generate_all_outputs(
+        dataset_dir,
+        output_csv,
+        force_fallback=force_fallback,
+        nemotron_adapter=adapter,
+    )
     print(f"Successfully generated and validated {len(rows)} rows.")
     print(f"File size: {size} bytes")
     print(f"SHA-256:   {sha256}")
