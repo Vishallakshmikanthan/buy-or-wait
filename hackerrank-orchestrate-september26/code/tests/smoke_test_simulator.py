@@ -54,7 +54,7 @@ def run_simulator_validation() -> None:
     print("\nSimulating all 250 evaluation requests (90-day horizon)...")
     t0 = time.perf_counter()
 
-    results: Dict[str, SimulationResult] = {}
+    results: dict[str, SimulationResult] = {}
     users_represented = set()
     total_projected_events = 0
     explicit_future_events_count = 0
