@@ -303,7 +303,7 @@ class TestOutputAssembly(unittest.TestCase):
         try:
             rows, _, _ = generate_all_outputs(self.dataset_dir, tmp_path)
             zero_rows = [r for r in rows if r.recommended_payment_method == "not_recommended"]
-            self.assertEqual(len(zero_rows), 69)
+            self.assertEqual(len(zero_rows), 67)
 
             non_empty_earliest_count = 0
             for z in zero_rows:
@@ -337,16 +337,16 @@ class TestOutputAssembly(unittest.TestCase):
                 methods[r.recommended_payment_method] = methods.get(r.recommended_payment_method, 0) + 1
                 statuses[r.affordability_status] = statuses.get(r.affordability_status, 0) + 1
 
-            self.assertEqual(methods.get("full_payment", 0), 66)
+            self.assertEqual(methods.get("full_payment", 0), 67)
             self.assertEqual(methods.get("installments", 0), 57)
-            self.assertEqual(methods.get("partial_payment", 0), 8)
+            self.assertEqual(methods.get("partial_payment", 0), 9)
             self.assertEqual(methods.get("wait", 0), 50)
-            self.assertEqual(methods.get("not_recommended", 0), 69)
+            self.assertEqual(methods.get("not_recommended", 0), 67)
 
             self.assertEqual(statuses.get("affordable_now", 0), 66)
-            self.assertEqual(statuses.get("affordable_with_plan", 0), 65)
+            self.assertEqual(statuses.get("affordable_with_plan", 0), 67)
             self.assertEqual(statuses.get("affordable_later", 0), 50)
-            self.assertEqual(statuses.get("not_affordable", 0), 69)
+            self.assertEqual(statuses.get("not_affordable", 0), 67)
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()

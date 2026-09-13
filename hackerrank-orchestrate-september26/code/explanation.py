@@ -312,6 +312,12 @@ class DeterministicFallbackGenerator:
             first_date, first_amt = facts.parsed_schedule[0]
             inst_amt_str = _format_money(first_amt, curr)
             date_str = _format_date(first_date)
+            if facts.spending_change_descriptions:
+                prefix = " and ".join(facts.spending_change_descriptions)
+                return (
+                    f"{prefix}, then use {num_installments} installments of {inst_amt_str}, starting {date_str}. "
+                    f"This leaves at least {cash_avail_str} available."
+                )
             return (
                 f"Use {num_installments} installments of {inst_amt_str}, starting {date_str}. "
                 f"This leaves at least {cash_avail_str} available."
@@ -324,6 +330,12 @@ class DeterministicFallbackGenerator:
             p1_amt_str = _format_money(p1_amt, curr)
             p2_amt_str = _format_money(p2_amt, curr)
             p2_date_str = _format_date(p2_date)
+            if facts.spending_change_descriptions:
+                prefix = " and ".join(facts.spending_change_descriptions)
+                return (
+                    f"{prefix}, then pay {p1_amt_str} today and the remaining {p2_amt_str} on {p2_date_str}. "
+                    f"This completes the full request and keeps the {floor_str} minimum protected."
+                )
             return (
                 f"Pay {p1_amt_str} today and the remaining {p2_amt_str} on {p2_date_str}. "
                 f"This completes the full request and keeps the {floor_str} minimum protected."
@@ -332,6 +344,12 @@ class DeterministicFallbackGenerator:
         # 5. WAIT (affordable_later)
         if method == "wait" and facts.earliest_date_for_full_payment is not None:
             wait_date_str = _format_date(facts.earliest_date_for_full_payment)
+            if facts.spending_change_descriptions:
+                prefix = " and ".join(facts.spending_change_descriptions)
+                return (
+                    f"{prefix}, then pay {req_amt_str} in full on {wait_date_str}. "
+                    f"Paying earlier would take the balance below the {floor_str} minimum."
+                )
             return (
                 f"Pay {req_amt_str} in full on {wait_date_str}. "
                 f"Paying earlier would take the balance below the {floor_str} minimum."

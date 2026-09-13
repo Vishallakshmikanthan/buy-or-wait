@@ -737,6 +737,16 @@ def build_decision_certificate(
             EvidenceRef("candidate_generation", c_src_obj, selected_c.candidate_id, "number_of_payments"),
             EvidenceRef("candidate_generation", c_src_obj, selected_c.candidate_id, "completion_date"),
         ])
+        if selected_c.spending_changes:
+            lineage_records.append(
+                EvidenceRef("candidate_generation", c_src_obj, selected_c.candidate_id, "spending_changes")
+            )
+            for sc_item in selected_c.spending_changes:
+                parts = sc_item.split(":")
+                if len(parts) >= 2:
+                    lineage_records.append(
+                        EvidenceRef("spending_changes", "SpendingChange", parts[1], parts[0])
+                    )
 
     if decision.ranking_trace is not None:
         lineage_records.extend([

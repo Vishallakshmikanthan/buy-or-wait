@@ -67,7 +67,7 @@ FROZEN_HASH_BASELINE = {
     "user_state.py": "789dfbb5b3a57b179fd4ccfc8b95e0a2ffe47a17",
     "affordability.py": "a81175aeed50d8ddeac3f33ca650b311c069355c",
     "payment_plan.py": "740ae3132a0237eaced86b3d31ac0435b6214a48",
-    "candidate_generation.py": "a1bfa7b8d62d6eec081c229f1cb54570050549f9",
+    "candidate_generation.py": "e1ab54ad795e724127c0e336fef7c720ef300999",
 }
 
 

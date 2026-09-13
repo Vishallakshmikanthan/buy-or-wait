@@ -36,17 +36,27 @@ All monetary values use Decimal. No float. No randomness. No wall-clock time.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from enum import Enum
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from code.canonical import CanonicalEvent
 from code.models import FinancialProfile, FinancialRequest, PaymentOption
 from code.payment_plan import (
     PaymentPlan,
     PaymentPlanFeasibility,
 )
+from code.recurrence import FutureEvent, RecurrenceSeries
 from code.safe_to_pay import SafeToPayCertificate
+from code.simulator import CashImpactType, Direction, SimulatedEvent
+from code.spending_changes import (
+    SpendingActionType,
+    SpendingChange,
+    generate_spending_change_scenarios,
+    identify_eligible_spending_actions,
+    optimize_spending_changes_for_candidate,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -707,6 +717,358 @@ def build_wait_candidate(
 
 
 # ---------------------------------------------------------------------------
+# SPENDING_CHANGE Rescue Candidates Construction (Phases 9 & 10)
+# ---------------------------------------------------------------------------
+
+def generate_spending_change_candidates(
+    request: FinancialRequest,
+    profile: FinancialProfile,
+    certificate: SafeToPayCertificate,
+    payment_option_feasibilities: Sequence[PaymentPlanFeasibility],
+    payment_options_by_id: Dict[str, PaymentOption],
+    canonical_events: Sequence[CanonicalEvent] = (),
+    future_events: Sequence[FutureEvent] = (),
+    recurrence_series: Sequence[RecurrenceSeries] = (),
+) -> List[Candidate]:
+    """Generate minimal-disruption spending-change rescue candidates.
+
+    Evaluates whether spending changes can rescue:
+      1. FULL_PAYMENT on request_date (if user accepts full_payment and base is unsafe).
+      2. INSTALLMENT_PLAN options (for eligible but unsafe installment options).
+      3. PARTIAL_PAYMENT (if allows_partial_payment and base partial is unsafe/missing).
+      4. WAIT on desired_completion_date (if user accepts full_payment and base wait is unsafe/missing).
+
+    Guarantees:
+      - Does NOT generate candidates if base candidate is already safe.
+      - Never uses float.
+      - Completely deterministic.
+      - Resimulates every candidate through simulate_user via optimize_spending_changes_for_candidate.
+    """
+    if not recurrence_series and not canonical_events:
+        return []
+
+    eligible_actions = identify_eligible_spending_actions(
+        user_id=request.user_id,
+        request_date=request.request_date,
+        simulation_end=request.request_date + timedelta(days=90),
+        profile=profile,
+        series_list=recurrence_series,
+        canonical_events=canonical_events,
+        future_events=future_events,
+    )
+    if not eligible_actions:
+        return []
+
+    scenarios = generate_spending_change_scenarios(eligible_actions, max_changes=3)
+    if not scenarios:
+        return []
+
+    rescued: List[Candidate] = []
+    sim_start = request.request_date
+    sim_end = request.request_date + timedelta(days=90)
+
+    # 1. FULL_PAYMENT rescue
+    if (
+        "full_payment" in profile.payment_methods_user_will_consider
+        and not certificate.is_full_payment_safe_today
+    ):
+        full_event = SimulatedEvent(
+            event_id=f"candidate_purchase_{request.request_id}_{request.request_date.strftime('%Y%m%d')}_{str(certificate.requested_amount).replace('.', '_')}",
+            user_id=request.user_id,
+            effective_date=request.request_date,
+            direction=Direction.OUTFLOW,
+            amount=certificate.requested_amount,
+            currency=profile.home_currency,
+            category=request.request_type,
+            event_type="expense",
+            description=f"Candidate purchase for request {request.request_id}",
+            cash_impact_type=CashImpactType.SETTLED_OUTFLOW,
+            flexibility="fixed",
+            is_protected=False,
+            source_type="action",
+            is_forecast=False,
+        )
+        best_scenario = optimize_spending_changes_for_candidate(
+            user_id=request.user_id,
+            simulation_start=sim_start,
+            simulation_end=sim_end,
+            profile=profile,
+            canonical_events=canonical_events,
+            future_events=future_events,
+            scenarios=scenarios,
+            candidate_events=(full_event,),
+        )
+        if best_scenario is not None:
+            payment = CandidatePayment(
+                payment_date=request.request_date,
+                amount=certificate.requested_amount,
+                sequence_number=1,
+            )
+            rescued.append(
+                Candidate(
+                    candidate_id=_make_candidate_id(request.request_id, CandidateType.FULL_PAYMENT, "today_with_spending_changes"),
+                    request_id=request.request_id,
+                    candidate_type=CandidateType.FULL_PAYMENT,
+                    payment_method=CandidateType.FULL_PAYMENT.value,
+                    total_amount_paid=certificate.requested_amount,
+                    first_payment_date=request.request_date,
+                    final_payment_date=request.request_date,
+                    number_of_payments=1,
+                    payment_schedule=(payment,),
+                    financing_fee=Decimal("0"),
+                    spending_changes=tuple(c.to_action_string() for c in best_scenario.changes),
+                    source_payment_option_id=None,
+                    is_safe=True,
+                    completion_date=request.request_date,
+                    feasibility_reason=None,
+                    status=CandidateStatus.ELIGIBLE_AND_SAFE,
+                    provenance=CandidateProvenance(
+                        source="spending_change_optimization",
+                        source_payment_option_id=None,
+                        safe_to_pay_certificate_id=certificate.request_id,
+                        earliest_full_payment_date=certificate.earliest_date_for_full_payment,
+                    ),
+                )
+            )
+
+    # 2. INSTALLMENT_PLAN rescue
+    for feasibility in payment_option_feasibilities:
+        option = payment_options_by_id.get(feasibility.payment_option_id)
+        if option is None or option.payment_method != "installments":
+            continue
+        if option.payment_method not in profile.payment_methods_user_will_consider:
+            continue
+        if not feasibility.is_eligible or feasibility.payment_plan is None:
+            continue
+        if feasibility.is_safe:
+            continue  # Already safe without spending changes
+
+        plan = feasibility.payment_plan
+        plan_events: List[SimulatedEvent] = []
+        schedule: List[CandidatePayment] = []
+        for entry in plan.entries:
+            plan_events.append(
+                SimulatedEvent(
+                    event_id=f"plan_action_{option.payment_option_id}_{entry.sequence_number}_{entry.date.strftime('%Y%m%d')}",
+                    user_id=request.user_id,
+                    effective_date=entry.date,
+                    direction=Direction.OUTFLOW,
+                    amount=entry.amount,
+                    currency=profile.home_currency,
+                    category="candidate_payment",
+                    event_type="action",
+                    description=f"Payment {entry.sequence_number} for option {option.payment_option_id}",
+                    cash_impact_type=CashImpactType.SETTLED_OUTFLOW,
+                    flexibility="fixed",
+                    is_protected=False,
+                    source_type="action",
+                    is_forecast=False,
+                )
+            )
+            schedule.append(
+                CandidatePayment(
+                    payment_date=entry.date,
+                    amount=entry.amount,
+                    sequence_number=entry.sequence_number,
+                )
+            )
+
+        best_scenario = optimize_spending_changes_for_candidate(
+            user_id=request.user_id,
+            simulation_start=sim_start,
+            simulation_end=sim_end,
+            profile=profile,
+            canonical_events=canonical_events,
+            future_events=future_events,
+            scenarios=scenarios,
+            candidate_events=tuple(plan_events),
+        )
+        if best_scenario is not None:
+            rescued.append(
+                Candidate(
+                    candidate_id=_make_candidate_id(
+                        request.request_id, CandidateType.INSTALLMENT_PLAN, f"{option.payment_option_id}_with_spending_changes"
+                    ),
+                    request_id=request.request_id,
+                    candidate_type=CandidateType.INSTALLMENT_PLAN,
+                    payment_method=CandidateType.INSTALLMENT_PLAN.value,
+                    total_amount_paid=plan.total_payable_amount,
+                    first_payment_date=plan.first_payment_date,
+                    final_payment_date=plan.last_payment_date,
+                    number_of_payments=plan.number_of_payments,
+                    payment_schedule=tuple(schedule),
+                    financing_fee=plan.financing_fee,
+                    spending_changes=tuple(c.to_action_string() for c in best_scenario.changes),
+                    source_payment_option_id=option.payment_option_id,
+                    is_safe=True,
+                    completion_date=plan.last_payment_date,
+                    feasibility_reason=None,
+                    status=CandidateStatus.ELIGIBLE_AND_SAFE,
+                    provenance=CandidateProvenance(
+                        source="spending_change_optimization",
+                        source_payment_option_id=option.payment_option_id,
+                        safe_to_pay_certificate_id=None,
+                        earliest_full_payment_date=plan.last_payment_date,
+                    ),
+                )
+            )
+
+    # 3. PARTIAL_PAYMENT rescue
+    if (
+        request.allows_partial_payment
+        and "partial_payment" in profile.payment_methods_user_will_consider
+        and Decimal("0") < certificate.amount_safe_to_pay < certificate.requested_amount
+    ):
+        earliest_date = certificate.earliest_date_for_full_payment
+        if earliest_date is None or earliest_date > request.desired_completion_date:
+            if request.desired_completion_date > request.request_date:
+                p1_amt = certificate.amount_safe_to_pay
+                p2_amt = certificate.requested_amount - p1_amt
+                p1_ev = SimulatedEvent(
+                    event_id=f"part_p1_{request.request_id}_{request.request_date.strftime('%Y%m%d')}",
+                    user_id=request.user_id,
+                    effective_date=request.request_date,
+                    direction=Direction.OUTFLOW,
+                    amount=p1_amt,
+                    currency=profile.home_currency,
+                    category=request.request_type,
+                    event_type="expense",
+                    description=f"Partial payment 1 for {request.request_id}",
+                    cash_impact_type=CashImpactType.SETTLED_OUTFLOW,
+                    flexibility="fixed",
+                    is_protected=False,
+                    source_type="action",
+                    is_forecast=False,
+                )
+                p2_ev = SimulatedEvent(
+                    event_id=f"part_p2_{request.request_id}_{request.desired_completion_date.strftime('%Y%m%d')}",
+                    user_id=request.user_id,
+                    effective_date=request.desired_completion_date,
+                    direction=Direction.OUTFLOW,
+                    amount=p2_amt,
+                    currency=profile.home_currency,
+                    category=request.request_type,
+                    event_type="expense",
+                    description=f"Partial payment 2 for {request.request_id}",
+                    cash_impact_type=CashImpactType.SETTLED_OUTFLOW,
+                    flexibility="fixed",
+                    is_protected=False,
+                    source_type="action",
+                    is_forecast=False,
+                )
+                best_scenario = optimize_spending_changes_for_candidate(
+                    user_id=request.user_id,
+                    simulation_start=sim_start,
+                    simulation_end=sim_end,
+                    profile=profile,
+                    canonical_events=canonical_events,
+                    future_events=future_events,
+                    scenarios=scenarios,
+                    candidate_events=(p1_ev, p2_ev),
+                )
+                if best_scenario is not None:
+                    p1 = CandidatePayment(request.request_date, p1_amt, 1)
+                    p2 = CandidatePayment(request.desired_completion_date, p2_amt, 2)
+                    rescued.append(
+                        Candidate(
+                            candidate_id=_make_candidate_id(request.request_id, CandidateType.PARTIAL_PAYMENT, "two_payment_with_spending_changes"),
+                            request_id=request.request_id,
+                            candidate_type=CandidateType.PARTIAL_PAYMENT,
+                            payment_method=CandidateType.PARTIAL_PAYMENT.value,
+                            total_amount_paid=certificate.requested_amount,
+                            first_payment_date=request.request_date,
+                            final_payment_date=request.desired_completion_date,
+                            number_of_payments=2,
+                            payment_schedule=(p1, p2),
+                            financing_fee=Decimal("0"),
+                            spending_changes=tuple(c.to_action_string() for c in best_scenario.changes),
+                            source_payment_option_id=None,
+                            is_safe=True,
+                            completion_date=request.desired_completion_date,
+                            feasibility_reason=None,
+                            status=CandidateStatus.ELIGIBLE_AND_SAFE,
+                            provenance=CandidateProvenance(
+                                source="spending_change_optimization",
+                                source_payment_option_id=None,
+                                safe_to_pay_certificate_id=certificate.request_id,
+                                earliest_full_payment_date=request.desired_completion_date,
+                            ),
+                        )
+                    )
+
+    # 4. WAIT rescue
+    if (
+        "full_payment" in profile.payment_methods_user_will_consider
+        and not certificate.is_full_payment_safe_today
+    ):
+        earliest_date = certificate.earliest_date_for_full_payment
+        if earliest_date is None or earliest_date > request.desired_completion_date:
+            if request.desired_completion_date > request.request_date:
+                wait_event = SimulatedEvent(
+                    event_id=f"candidate_wait_{request.request_id}_{request.desired_completion_date.strftime('%Y%m%d')}_{str(certificate.requested_amount).replace('.', '_')}",
+                    user_id=request.user_id,
+                    effective_date=request.desired_completion_date,
+                    direction=Direction.OUTFLOW,
+                    amount=certificate.requested_amount,
+                    currency=profile.home_currency,
+                    category=request.request_type,
+                    event_type="expense",
+                    description=f"Candidate wait purchase for request {request.request_id}",
+                    cash_impact_type=CashImpactType.SETTLED_OUTFLOW,
+                    flexibility="fixed",
+                    is_protected=False,
+                    source_type="action",
+                    is_forecast=False,
+                )
+                best_scenario = optimize_spending_changes_for_candidate(
+                    user_id=request.user_id,
+                    simulation_start=sim_start,
+                    simulation_end=sim_end,
+                    profile=profile,
+                    canonical_events=canonical_events,
+                    future_events=future_events,
+                    scenarios=scenarios,
+                    candidate_events=(wait_event,),
+                )
+                if best_scenario is not None:
+                    payment = CandidatePayment(
+                        payment_date=request.desired_completion_date,
+                        amount=certificate.requested_amount,
+                        sequence_number=1,
+                    )
+                    rescued.append(
+                        Candidate(
+                            candidate_id=_make_candidate_id(
+                                request.request_id, CandidateType.WAIT, f"{request.desired_completion_date.isoformat()}_with_spending_changes"
+                            ),
+                            request_id=request.request_id,
+                            candidate_type=CandidateType.WAIT,
+                            payment_method=CandidateType.WAIT.value,
+                            total_amount_paid=certificate.requested_amount,
+                            first_payment_date=request.desired_completion_date,
+                            final_payment_date=request.desired_completion_date,
+                            number_of_payments=1,
+                            payment_schedule=(payment,),
+                            financing_fee=Decimal("0"),
+                            spending_changes=tuple(c.to_action_string() for c in best_scenario.changes),
+                            source_payment_option_id=None,
+                            is_safe=True,
+                            completion_date=request.desired_completion_date,
+                            feasibility_reason=None,
+                            status=CandidateStatus.ELIGIBLE_AND_SAFE,
+                            provenance=CandidateProvenance(
+                                source="spending_change_optimization",
+                                source_payment_option_id=None,
+                                safe_to_pay_certificate_id=certificate.request_id,
+                                earliest_full_payment_date=request.desired_completion_date,
+                            ),
+                        )
+                    )
+
+    return rescued
+
+
+# ---------------------------------------------------------------------------
 # Master Candidate Generation Function
 # ---------------------------------------------------------------------------
 
@@ -716,6 +1078,9 @@ def generate_candidates(
     certificate: SafeToPayCertificate,
     payment_option_feasibilities: Sequence[PaymentPlanFeasibility],
     payment_options_by_id: Dict[str, PaymentOption],
+    canonical_events: Sequence[CanonicalEvent] = (),
+    future_events: Sequence[FutureEvent] = (),
+    recurrence_series: Sequence[RecurrenceSeries] = (),
 ) -> CandidateSet:
     """Generate the complete deterministic candidate set for a single request.
 
@@ -735,6 +1100,9 @@ def generate_candidates(
         certificate:                 SafeToPayCertificate from the frozen safe_to_pay engine.
         payment_option_feasibilities: All feasibility results from the frozen payment_plan engine.
         payment_options_by_id:       Dict mapping payment_option_id -> PaymentOption for lineage.
+        canonical_events:            User's canonical events for spending change simulation.
+        future_events:               User's future recurring events for spending change simulation.
+        recurrence_series:           User's recurring series for spending change policy evaluation.
 
     Returns:
         CandidateSet with immutable, deterministically ordered candidates.
@@ -776,7 +1144,22 @@ def generate_candidates(
         candidates.append(wait_cand)
 
     # =========================================================================
-    # 5. Deterministic ordering (s13 - reproducibility only, NOT ranking)
+    # 5. SPENDING-CHANGE RESCUE CANDIDATES (Phases 9 & 10)
+    # =========================================================================
+    spending_rescued = generate_spending_change_candidates(
+        request=request,
+        profile=profile,
+        certificate=certificate,
+        payment_option_feasibilities=payment_option_feasibilities,
+        payment_options_by_id=payment_options_by_id,
+        canonical_events=canonical_events,
+        future_events=future_events,
+        recurrence_series=recurrence_series,
+    )
+    candidates.extend(spending_rescued)
+
+    # =========================================================================
+    # 6. Deterministic ordering (s13 - reproducibility only, NOT ranking)
     # =========================================================================
     candidates.sort(key=_candidates_sort_key)
 

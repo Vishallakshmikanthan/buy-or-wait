@@ -353,7 +353,16 @@ def generate_all_outputs(
             for o in options
         ]
         feas_dict = {f.payment_option_id: f for f in feasibilities}
-        cset = generate_candidates(req, profile, cert_safe, feasibilities, opts_by_id)
+        cset = generate_candidates(
+            request=req,
+            profile=profile,
+            certificate=cert_safe,
+            payment_option_feasibilities=feasibilities,
+            payment_options_by_id=opts_by_id,
+            canonical_events=user_canonical[uid],
+            future_events=future_res.future_events,
+            recurrence_series=all_series[uid],
+        )
         ctx = RequestContext(
             request=req,
             profile=profile,

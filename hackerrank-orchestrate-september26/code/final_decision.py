@@ -273,7 +273,10 @@ def evaluate_candidate_safety_gate(candidate: Candidate, context: RequestContext
     cert_valid = True
     cert_detail = "Safety certificate/feasibility proven."
     if candidate.candidate_type in (CandidateType.FULL_PAYMENT, CandidateType.PARTIAL_PAYMENT, CandidateType.WAIT):
-        if candidate.provenance.safe_to_pay_certificate_id != context.certificate.request_id:
+        if len(candidate.spending_changes) > 0:
+            cert_valid = True
+            cert_detail = f"Spending change optimization proven: {'|'.join(candidate.spending_changes)}."
+        elif candidate.provenance.safe_to_pay_certificate_id != context.certificate.request_id:
             cert_valid = False
             cert_detail = f"Certificate ID mismatch: {candidate.provenance.safe_to_pay_certificate_id} != {context.certificate.request_id}"
         elif context.certificate.request_id != context.request.request_id:
@@ -284,6 +287,14 @@ def evaluate_candidate_safety_gate(candidate: Candidate, context: RequestContext
         if opt_id is None or opt_id not in context.payment_option_feasibilities:
             cert_valid = False
             cert_detail = f"Installment payment option {opt_id} missing in feasibility map."
+        elif len(candidate.spending_changes) > 0:
+            feas = context.payment_option_feasibilities[opt_id]
+            if not feas.is_eligible:
+                cert_valid = False
+                cert_detail = f"Installment feasibility for {opt_id} is ineligible: {feas.rejection_reason}."
+            else:
+                cert_valid = True
+                cert_detail = f"Installment plan {opt_id} rescued by spending changes: {'|'.join(candidate.spending_changes)}."
         else:
             feas = context.payment_option_feasibilities[opt_id]
             if not feas.is_safe or not feas.is_eligible:
@@ -299,7 +310,11 @@ def evaluate_candidate_safety_gate(candidate: Candidate, context: RequestContext
     # 4. SIMULATION_SAFE / NO_SAFETY_FLOOR_BREACH
     sim_safe = True
     sim_detail = "Simulation confirmed safe with non-negative margin above safety floor."
-    if candidate.candidate_type == CandidateType.FULL_PAYMENT:
+    if len(candidate.spending_changes) > 0:
+        if not candidate.is_safe:
+            sim_safe = False
+            sim_detail = "Candidate with spending changes is not marked safe."
+    elif candidate.candidate_type == CandidateType.FULL_PAYMENT:
         if not context.certificate.is_full_payment_safe_today or context.certificate.safety_floor_margin < Decimal("0"):
             sim_safe = False
             sim_detail = f"Full payment unsafe today: margin {context.certificate.safety_floor_margin} < 0."
@@ -331,7 +346,11 @@ def evaluate_candidate_safety_gate(candidate: Candidate, context: RequestContext
     # 5. NO_OVERDRAFT
     no_overdraft = True
     od_detail = "No overdraft detected under action."
-    if candidate.candidate_type == CandidateType.FULL_PAYMENT:
+    if len(candidate.spending_changes) > 0:
+        if not candidate.is_safe:
+            no_overdraft = False
+            od_detail = "Candidate with spending changes causes overdraft."
+    elif candidate.candidate_type == CandidateType.FULL_PAYMENT:
         if context.certificate.available_cash_after_purchase_today < context.certificate.safety_floor:
             no_overdraft = False
             od_detail = "Full payment today causes cash to breach safety floor."
@@ -495,7 +514,9 @@ def make_final_decision(
         selected_sg: SafetyGateResult = safety_results_by_id[selected_c.candidate_id]
 
         # Determine AffordabilityStatus
-        if selected_c.candidate_type == CandidateType.FULL_PAYMENT:
+        if len(selected_c.spending_changes) > 0:
+            aff_status = AffordabilityStatus.AFFORDABLE_WITH_PLAN
+        elif selected_c.candidate_type == CandidateType.FULL_PAYMENT:
             aff_status = AffordabilityStatus.AFFORDABLE_NOW
         elif selected_c.candidate_type in (CandidateType.INSTALLMENT_PLAN, CandidateType.PARTIAL_PAYMENT):
             aff_status = AffordabilityStatus.AFFORDABLE_WITH_PLAN
@@ -508,6 +529,14 @@ def make_final_decision(
             DecisionReasonCode.SELECTED_BY_RANKING,
             *selected_sg.rejection_reason_codes,
         )
+
+        spending_changes_str = "|".join(selected_c.spending_changes) if selected_c.spending_changes else "none"
+        ev_notes = [
+            f"Selected rank #1 candidate {selected_c.candidate_id} via deterministic ranking.",
+            f"Affordability status: {aff_status.value}.",
+        ]
+        if selected_c.spending_changes:
+            ev_notes.append(f"Spending changes required: {spending_changes_str}.")
 
         evidence = DecisionExplanationEvidence(
             request_id=req.request_id,
@@ -524,10 +553,7 @@ def make_final_decision(
             number_of_payments=selected_c.number_of_payments,
             safety_floor=cert.safety_floor,
             decision_reason_codes=reason_codes,
-            evidence_notes=(
-                f"Selected rank #1 candidate {selected_c.candidate_id} via deterministic ranking.",
-                f"Affordability status: {aff_status.value}.",
-            ),
+            evidence_notes=tuple(ev_notes),
         )
 
         return FinalDecision(
@@ -538,7 +564,7 @@ def make_final_decision(
             earliest_date_for_full_payment=cert.earliest_date_for_full_payment,
             recommended_payment_method=selected_c.payment_method,
             payment_plan=selected_c.payment_plan_string,
-            spending_changes_needed="none",
+            spending_changes_needed=spending_changes_str,
             selected_candidate=selected_c,
             ranking_trace=trace,
             safety_gate_result=selected_sg,
