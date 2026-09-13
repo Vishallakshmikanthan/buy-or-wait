@@ -43,6 +43,16 @@ python3 code/main.py
 
 After running your solution, confirm that `output.csv` exists in the repository root and contains the required columns and one row for every request.
 
+### Running Tests
+
+Execute the comprehensive test suite using Python's standard library `unittest` framework:
+
+```bash
+python -m unittest discover -s code/tests -p "test_*.py"
+```
+
+> **Note on `pytest` / Standard Library Shadowing:** The challenge starter repository specifies `code/` as the project directory. Because Python's standard library includes a module named `code` (used internally by `pdb` and `pytest` debugging hooks), running `pytest` directly causes standard library shadowing (`AttributeError: module 'code' has no attribute 'InteractiveConsole'`). Python's standard library `unittest` runner is unaffected and is the official supported test runner.
+
 ## Important File Locations
 
 ```text

@@ -1,0 +1,9 @@
+# Buy or Wait? — HackerRank Orchestrate (September 2026)
+# Runtime Dependencies: None (Pure Python 3 standard library only)
+#
+# All core execution, data modeling, financial logic, simulation,
+# image verification, message causal interpretation, and HTTP APIs
+# utilize standard library modules:
+# - dataclasses, datetime, decimal, enum, pathlib, typing
+# - csv, json, math, re, time, urllib.request, urllib.error
+# - unittest (standard test discovery and execution)

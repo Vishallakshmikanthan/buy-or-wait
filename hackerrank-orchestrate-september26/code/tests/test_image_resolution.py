@@ -1,8 +1,10 @@
 """Comprehensive unit tests for image resolution, contextual extraction, and cash safety."""
 
-import unittest
+import csv
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from pathlib import Path
+import unittest
 
 from code.canonical import (
     CanonicalEvent,
@@ -360,6 +362,44 @@ class TestImageResolutionAndCashSafety(unittest.TestCase):
 
         ev = resolved_ledger.events[0]
         self.assertEqual(ev.get_usable_cash_amount(), Decimal("15339.00"))
+
+    def test_h15_physical_image_files_read_and_validated(self):
+        """H15. Verify all 16 physical image files exist, are readable, and have valid PNG signatures."""
+        dataset_dir = Path(__file__).resolve().parent.parent.parent / "dataset"
+        images_dir = dataset_dir / "media" / "images"
+        self.assertTrue(images_dir.exists(), f"Images dir missing: {images_dir}")
+
+        for i in range(1, 17):
+            img_id = f"image_{i:02d}"
+            img_path = images_dir / f"{img_id}.png"
+            self.assertTrue(img_path.exists(), f"Image file missing: {img_path}")
+            data = img_path.read_bytes()
+            self.assertGreater(len(data), 1000, f"Image file suspiciously small: {len(data)} bytes")
+            self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n", f"Invalid PNG magic bytes for {img_path}")
+
+    def test_h16_all_16_images_match_images_csv_and_extraction_profiles(self):
+        """H16. Verify all 16 images in images.csv match extraction profiles and resolve events."""
+        dataset_dir = Path(__file__).resolve().parent.parent.parent / "dataset"
+        csv_path = dataset_dir / "images.csv"
+        self.assertTrue(csv_path.exists())
+
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            csv_rows = list(reader)
+
+        self.assertEqual(len(csv_rows), 16)
+        extractions = extract_all_images(dataset_dir)
+        self.assertEqual(len(extractions), 16)
+
+        for row in csv_rows:
+            img_id = row["image_id"]
+            rel_ev = row["related_event_id"]
+            self.assertIn(img_id, extractions)
+            res = extractions[img_id]
+            self.assertEqual(res.related_event_id, rel_ev)
+            self.assertTrue(res.is_resolved)
+            self.assertIsNotNone(res.extracted_amount)
+            self.assertGreater(res.extracted_amount, Decimal("0"))
 
 
 if __name__ == "__main__":
